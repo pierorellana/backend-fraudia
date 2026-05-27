@@ -10,8 +10,6 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
-from app.schemas.imports import DataImportPayload
-from app.schemas.imports import DataImportResponse
 from app.schemas.imports import FileImportResponse
 from app.services.file_import_service import FileImportService
 from app.services.import_service import ImportService
@@ -19,22 +17,6 @@ from app.services.import_service import ImportService
 router = APIRouter()
 import_service = ImportService()
 file_import_service = FileImportService(import_service=import_service)
-
-
-@router.post("/batch", response_model=GeneralResponse[DataImportResponse])
-def import_batch(
-    payload: DataImportPayload,
-    db: Session = Depends(get_db),
-    reset: bool = Query(default=False),
-) -> GeneralResponse[DataImportResponse]:
-    try:
-        return success_response(
-            import_service.import_payload(db, payload, reset=reset),
-            message="Datos importados correctamente.",
-        )
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="No se pudo importar el lote de datos.") from exc
 
 
 @router.post("/file", response_model=GeneralResponse[FileImportResponse])

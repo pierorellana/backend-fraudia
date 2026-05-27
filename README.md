@@ -74,12 +74,6 @@ Swagger:
 http://127.0.0.1:8000/docs
 ```
 
-Health check:
-
-```text
-GET /api/health
-```
-
 ## Formato de respuesta
 
 Todos los endpoints responden con la misma estructura:
@@ -167,16 +161,13 @@ El recalculo de scores durante imports no usa embeddings de Ollama para evitar l
 ## Endpoints principales
 
 ```text
-GET  /api/health
 GET  /api/claims
 GET  /api/claims/{claim_id}
 POST /api/claims/{claim_id}/assess
 
-POST /api/imports/batch
 POST /api/imports/file
 
 GET  /api/risk/top
-POST /api/risk/recalculate
 
 GET  /api/analytics/summary
 GET  /api/analytics/providers
@@ -193,6 +184,15 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/agent/query" `
   -ContentType "application/json" `
   -Body '{"question":"Por que este siniestro fue marcado como alto riesgo?","claim_id":"50000000-0000-0000-0000-000000000001"}'
+```
+
+La respuesta incluye `session_id`. Para continuar la conversacion del mismo siniestro, envia ese `session_id` en las siguientes preguntas; ya no es necesario repetir `claim_id`.
+
+```json
+{
+  "question": "Que deberia revisar primero?",
+  "session_id": "id-devuelto-por-la-primera-respuesta"
+}
 ```
 
 ## Rango del score

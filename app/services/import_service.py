@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.models.domain import Claim
 from app.models.domain import ClaimDocument
+from app.models.domain import ChatMessage
+from app.models.domain import ChatSession
 from app.models.domain import Insured
 from app.models.domain import Policy
 from app.models.domain import Provider
@@ -111,6 +113,8 @@ class ImportService:
     def _clear_data(self, db: Session) -> None:
         db.execute(delete(RiskAlert))
         db.execute(delete(RiskAssessment))
+        db.execute(delete(ChatMessage))
+        db.execute(delete(ChatSession))
         db.execute(delete(ClaimDocument))
         db.execute(delete(Claim))
         db.execute(delete(Vehicle))

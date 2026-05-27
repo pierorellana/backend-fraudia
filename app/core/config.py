@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "ASUR AntiFraud API"
+    app_name: str = "Fraudi API"
     environment: str = "local"
     api_prefix: str = "/api"
     auto_create_tables: bool = True
@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     ollama_embeddings_enabled: bool = False
     ollama_embedding_model: str = "bge-m3"
     ollama_timeout_seconds: float = 45.0
+
+    agent_default_user_id: str | None = None
 
     import_max_rows: int = 5000
     import_timeout_seconds: float = 60.0

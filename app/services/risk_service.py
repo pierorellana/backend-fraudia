@@ -18,7 +18,6 @@ from app.models.domain import Policy
 from app.models.domain import RiskAlert
 from app.models.domain import RiskAssessment
 from app.models.domain import Vehicle
-from app.models.enums import RiskLevel
 from app.services.risk_engine import RiskContext
 from app.services.risk_engine import RiskEngine
 from app.services.risk_engine import jaccard_similarity
@@ -153,20 +152,6 @@ class RiskService:
 
         db.commit()
         return len(unique_claim_ids)
-
-    def recalculate_all(self, db: Session) -> dict[str, int]:
-        claim_ids = db.scalars(select(Claim.id).order_by(Claim.id)).all()
-        counts = {RiskLevel.HIGH.value: 0, RiskLevel.MEDIUM.value: 0, RiskLevel.LOW.value: 0}
-        for claim_id in claim_ids:
-            assessment = self.assess_claim(db, claim_id)
-            counts[assessment.level or RiskLevel.LOW.value] += 1
-
-        return {
-            "processed": len(claim_ids),
-            "high_risk": counts[RiskLevel.HIGH.value],
-            "medium_risk": counts[RiskLevel.MEDIUM.value],
-            "low_risk": counts[RiskLevel.LOW.value],
-        }
 
     def _get_claim_for_assessment(self, db: Session, claim_id: str) -> Claim:
         claim = db.scalars(

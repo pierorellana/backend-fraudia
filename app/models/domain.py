@@ -233,3 +233,48 @@ class RiskAlert(Base):
     @property
     def title(self) -> str:
         return self.category or self.code or "Alerta de riesgo"
+
+
+class ChatSession(Base):
+    __tablename__ = "sesiones_chat"
+
+    id: Mapped[str] = mapped_column("id_sesion", UUIDString, primary_key=True)
+    user_id: Mapped[str | None] = mapped_column("id_usuario", UUIDString, nullable=True)
+    title: Mapped[str | None] = mapped_column("titulo", String(160), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column("creada_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("ultima_actividad", DateTime, nullable=True)
+    active_filters: Mapped[dict | None] = mapped_column("filtros_activos", JSONBType, nullable=True)
+    active: Mapped[bool] = mapped_column("activa", Boolean, default=True, nullable=False)
+
+    messages: Mapped[list[ChatMessage]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def claim_id(self) -> str | None:
+        if not self.active_filters:
+            return None
+        return self.active_filters.get("id_siniestro") or self.active_filters.get("claim_id")
+
+    @claim_id.setter
+    def claim_id(self, value: str | None) -> None:
+        filters = dict(self.active_filters or {})
+        if value:
+            filters["id_siniestro"] = value
+        else:
+            filters.pop("id_siniestro", None)
+            filters.pop("claim_id", None)
+        self.active_filters = filters or None
+
+
+class ChatMessage(Base):
+    __tablename__ = "mensajes_chat"
+
+    id: Mapped[str] = mapped_column("id_mensaje", UUIDString, primary_key=True)
+    session_id: Mapped[str] = mapped_column("id_sesion", ForeignKey("sesiones_chat.id_sesion"), index=True)
+    role: Mapped[str] = mapped_column("rol", String(20), nullable=False)
+    content: Mapped[str] = mapped_column("contenido", Text, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+
+    session: Mapped[ChatSession] = relationship(back_populates="messages")

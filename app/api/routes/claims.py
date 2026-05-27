@@ -2,27 +2,22 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.enums import RiskLevel
 from app.repositories.claims import ClaimRepository
-from app.schemas.claims import ClaimCreate
 from app.schemas.claims import ClaimDetailRead
 from app.schemas.claims import ClaimListResponse
 from app.schemas.claims import ClaimRead
 from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
-from app.schemas.imports import DataImportPayload
 from app.schemas.risk import RiskAssessmentRead
-from app.services.import_service import ImportService
 from app.services.risk_service import RiskService
 
 router = APIRouter()
 claims = ClaimRepository()
 risk_service = RiskService()
-import_service = ImportService(risk_service=risk_service)
 
 
 @router.get("", response_model=GeneralResponse[ClaimListResponse])
@@ -35,23 +30,6 @@ def list_claims(
 ) -> GeneralResponse[ClaimListResponse]:
     items, total = claims.list(db, risk_level=risk_level, min_score=min_score, limit=limit, offset=offset)
     return success_response(ClaimListResponse(items=items, total=total, limit=limit, offset=offset))
-
-
-@router.post("", response_model=GeneralResponse[ClaimRead], status_code=201)
-def create_claim(payload: ClaimCreate, db: Session = Depends(get_db)) -> GeneralResponse[ClaimRead]:
-    try:
-        import_service.import_payload(db, DataImportPayload(claims=[payload]))
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="No se pudo crear el siniestro. Verifica que poliza, asegurado y actores existan.",
-        ) from exc
-
-    claim = claims.get_by_id(db, payload.id)
-    if not claim:
-        raise HTTPException(status_code=404, detail="Claim was created but could not be loaded")
-    return success_response(claim, message="Siniestro creado correctamente.")
 
 
 @router.get("/{claim_id}", response_model=GeneralResponse[ClaimDetailRead])

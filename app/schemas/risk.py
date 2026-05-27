@@ -36,10 +36,3 @@ class RiskAssessmentRead(BaseModel):
     alerts: list[RiskAlertRead] = []
 
     model_config = ConfigDict(from_attributes=True)
-
-
-class RiskRecalculateResponse(BaseModel):
-    processed: int
-    high_risk: int
-    medium_risk: int
-    low_risk: int

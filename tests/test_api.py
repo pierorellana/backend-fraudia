@@ -13,9 +13,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.db.session import engine  # noqa: E402
+from app.db.session import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.domain import ChatMessage  # noqa: E402
+from app.schemas.imports import DataImportPayload  # noqa: E402
 from app.services.ollama_client import OllamaClient  # noqa: E402
 from app.services.file_import_service import FileImportService  # noqa: E402
+from app.services.import_service import ImportService  # noqa: E402
 
 INSURED_ID = "00000000-0000-0000-0000-000000000101"
 POLICY_ID = "10000000-0000-0000-0000-000000000101"
@@ -86,7 +90,15 @@ def base_payload() -> dict:
     }
 
 
-def test_batch_import_and_top_risk_cases() -> None:
+def import_test_payload(payload: dict, *, reset: bool = True) -> dict[str, int]:
+    db = SessionLocal()
+    try:
+        return ImportService().import_payload(db, DataImportPayload(**payload), reset=reset)
+    finally:
+        db.close()
+
+
+def test_import_service_and_top_risk_cases() -> None:
     payload = base_payload()
     payload["claims"] = [
         {
@@ -123,15 +135,9 @@ def test_batch_import_and_top_risk_cases() -> None:
     ]
 
     with TestClient(app) as client:
-        health = client.get("/api/health")
-        assert health.status_code == 200
-        assert health.json()["success"] is True
-
-        imported = client.post("/api/imports/batch?reset=true", json=payload)
-        assert imported.status_code == 200
-        assert imported.json()["success"] is True
-        assert imported.json()["data"]["claims"] == 1
-        assert imported.json()["data"]["assessments"] == 1
+        imported = import_test_payload(payload)
+        assert imported["claims"] == 1
+        assert imported["assessments"] == 1
 
         top = client.get("/api/risk/top?limit=1")
         assert top.status_code == 200
@@ -151,7 +157,7 @@ def test_csv_file_import_for_claims() -> None:
     )
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=base_payload())
+        import_test_payload(base_payload())
 
         response = client.post(
             "/api/imports/file?dataset=siniestros",
@@ -177,7 +183,7 @@ def test_csv_file_import_infers_dataset_from_filename_without_query() -> None:
     )
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=base_payload())
+        import_test_payload(base_payload())
 
         response = client.post(
             "/api/imports/file",
@@ -198,7 +204,7 @@ def test_csv_file_import_infers_dataset_from_headers_for_generic_filename() -> N
     )
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=base_payload())
+        import_test_payload(base_payload())
 
         response = client.post(
             "/api/imports/file",
@@ -234,7 +240,7 @@ def test_csv_file_import_many_claims_skips_ollama_embeddings(monkeypatch) -> Non
     csv_content = "\n".join(rows) + "\n"
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=base_payload())
+        import_test_payload(base_payload())
 
         response = client.post(
             "/api/imports/file?dataset=siniestros",
@@ -274,7 +280,7 @@ def test_csv_file_import_for_documents_with_claim_id_column() -> None:
     )
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=payload)
+        import_test_payload(payload)
 
         response = client.post(
             "/api/imports/file?dataset=documentos",
@@ -434,7 +440,7 @@ def test_agent_explains_claim_without_llm() -> None:
     ]
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=payload)
+        import_test_payload(payload)
 
         response = client.post(
             "/api/agent/query",
@@ -449,6 +455,62 @@ def test_agent_explains_claim_without_llm() -> None:
         assert response_payload["success"] is True
         assert response_payload["data"]["used_llm"] is False
         assert CLAIM_ID in response_payload["data"]["answer"]
+
+
+def test_agent_keeps_claim_session_history() -> None:
+    payload = base_payload()
+    payload["claims"] = [
+        {
+            "id": CLAIM_ID,
+            "policy_id": POLICY_ID,
+            "insured_id": INSURED_ID,
+            "provider_id": PROVIDER_ID,
+            "branch": "Vehiculos",
+            "coverage": "Robo",
+            "occurrence_date": "2026-01-03",
+            "reported_date": "2026-01-10",
+            "claimed_amount": "24000",
+            "status": "Reserva",
+            "office": "Quito Norte",
+            "description": "Robo total del vehiculo durante madrugada sin testigos.",
+            "documents": [],
+        }
+    ]
+
+    with TestClient(app) as client:
+        import_test_payload(payload)
+
+        first_response = client.post(
+            "/api/agent/query",
+            json={
+                "question": "Explicame el riesgo de este siniestro",
+                "claim_id": CLAIM_ID,
+            },
+        )
+        assert first_response.status_code == 200
+        session_id = first_response.json()["data"]["session_id"]
+        assert session_id
+
+        second_response = client.post(
+            "/api/agent/query",
+            json={
+                "question": "Y que debo revisar primero?",
+                "session_id": session_id,
+            },
+        )
+
+        assert second_response.status_code == 200
+        second_payload = second_response.json()["data"]
+        assert second_payload["session_id"] == session_id
+        assert second_payload["claim_id"] == CLAIM_ID
+        assert CLAIM_ID in second_payload["answer"]
+
+    db = SessionLocal()
+    try:
+        message_count = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).count()
+        assert message_count == 4
+    finally:
+        db.close()
 
 
 def test_analytics_endpoints_after_real_import() -> None:
@@ -472,7 +534,7 @@ def test_analytics_endpoints_after_real_import() -> None:
     ]
 
     with TestClient(app) as client:
-        client.post("/api/imports/batch?reset=true", json=payload)
+        import_test_payload(payload)
 
         summary = client.get("/api/analytics/summary")
         assert summary.status_code == 200

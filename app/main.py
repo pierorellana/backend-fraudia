@@ -51,6 +51,5 @@ def root() -> GeneralResponse[dict[str, str]]:
         {
             "service": settings.app_name,
             "docs": "/docs",
-            "health": f"{settings.api_prefix}/health",
         }
     )

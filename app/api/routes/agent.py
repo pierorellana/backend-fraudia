@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -15,11 +16,16 @@ agent_service = AgentService()
 
 @router.post("/query", response_model=GeneralResponse[AgentResponse])
 def query_agent(payload: AgentQuery, db: Session = Depends(get_db)) -> GeneralResponse[AgentResponse]:
-    return success_response(
-        agent_service.answer(
-            db,
-            question=payload.question,
-            claim_id=payload.claim_id,
-            use_llm=payload.use_llm,
+    try:
+        return success_response(
+            agent_service.answer(
+                db,
+                question=payload.question,
+                claim_id=payload.claim_id,
+                session_id=payload.session_id,
+                user_id=payload.user_id,
+                use_llm=payload.use_llm,
+            )
         )
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

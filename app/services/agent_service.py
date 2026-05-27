@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import UTC
+from datetime import datetime
+from uuid import uuid4
+
 from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.models.domain import ChatMessage
+from app.models.domain import ChatSession
 from app.models.domain import Claim
 from app.models.domain import ClaimDocument
 from app.models.domain import RiskAlert
@@ -27,19 +35,201 @@ class AgentService:
         self.analytics = analytics or AnalyticsService()
         self.ollama = ollama or OllamaClient()
 
-    def answer(self, db: Session, *, question: str, claim_id: str | None, use_llm: bool | None) -> AgentResponse:
-        context, sources = self._build_context(db, question=question, claim_id=claim_id)
+    def answer(
+        self,
+        db: Session,
+        *,
+        question: str,
+        claim_id: str | None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        use_llm: bool | None,
+    ) -> AgentResponse:
+        session = self._get_or_create_session(
+            db,
+            claim_id=claim_id,
+            session_id=session_id,
+            user_id=user_id,
+            question=question,
+        )
+        resolved_claim_id = session.claim_id if session else claim_id
+        history = self._recent_messages(db, session.id) if session else []
+        context, sources = self._build_context(
+            db,
+            question=question,
+            claim_id=resolved_claim_id,
+            history=history,
+        )
         should_use_llm = settings.ollama_enabled if use_llm is None else use_llm
         if should_use_llm:
             llm_answer = self.ollama.chat(question=question, context=context)
             if llm_answer:
-                return AgentResponse(answer=llm_answer, sources=sources, used_llm=True)
+                self._store_exchange(db, session=session, question=question, answer=llm_answer)
+                return AgentResponse(
+                    answer=llm_answer,
+                    session_id=session.id if session else None,
+                    claim_id=resolved_claim_id,
+                    sources=sources,
+                    used_llm=True,
+                )
 
-        return AgentResponse(answer=self._deterministic_answer(db, question=question, claim_id=claim_id), sources=sources)
+        answer = self._deterministic_answer(db, question=question, claim_id=resolved_claim_id)
+        self._store_exchange(db, session=session, question=question, answer=answer)
+        return AgentResponse(
+            answer=answer,
+            session_id=session.id if session else None,
+            claim_id=resolved_claim_id,
+            sources=sources,
+        )
 
-    def _build_context(self, db: Session, *, question: str, claim_id: str | None) -> tuple[str, list[str]]:
+    def _get_or_create_session(
+        self,
+        db: Session,
+        *,
+        claim_id: str | None,
+        session_id: str | None,
+        user_id: str | None,
+        question: str,
+    ) -> ChatSession | None:
+        now = self._utc_now()
+        if claim_id and not db.get(Claim, claim_id):
+            raise ValueError(f"No encontre el siniestro {claim_id}.")
+
+        if session_id:
+            session = db.get(ChatSession, session_id)
+            if not session:
+                raise ValueError(f"Sesion de chat no encontrada: {session_id}.")
+            if claim_id and session.claim_id and session.claim_id != claim_id:
+                raise ValueError(
+                    f"La sesion {session_id} pertenece al siniestro {session.claim_id}, no a {claim_id}."
+                )
+            if claim_id and not session.claim_id:
+                session.claim_id = claim_id
+            session.updated_at = now
+            db.flush()
+            return session
+
+        if claim_id:
+            session = self._find_session_for_claim(db, claim_id)
+            if session:
+                session.updated_at = now
+                db.flush()
+                return session
+
+            resolved_user_id = self._resolve_user_id(db, user_id)
+            session = ChatSession(
+                id=str(uuid4()),
+                user_id=resolved_user_id,
+                title=question[:160],
+                created_at=now,
+                updated_at=now,
+                active_filters={"id_siniestro": claim_id},
+                active=True,
+            )
+            db.add(session)
+            db.flush()
+            return session
+
+        return None
+
+    def _resolve_user_id(self, db: Session, user_id: str | None) -> str | None:
+        if user_id:
+            return user_id
+        if settings.agent_default_user_id:
+            return settings.agent_default_user_id
+
+        try:
+            resolved_user_id = db.execute(text("SELECT id_usuario FROM usuarios LIMIT 1")).scalar_one_or_none()
+        except SQLAlchemyError:
+            db.rollback()
+            if db.bind and db.bind.dialect.name == "sqlite":
+                return None
+            raise ValueError(
+                "No pude leer la tabla usuarios para crear la sesion de chat. "
+                "Envia user_id en el body o configura AGENT_DEFAULT_USER_ID."
+            )
+
+        if not resolved_user_id:
+            raise ValueError(
+                "No encontre usuarios para crear la sesion de chat. "
+                "Envia user_id en el body o configura AGENT_DEFAULT_USER_ID."
+            )
+        return str(resolved_user_id)
+
+    def _find_session_for_claim(self, db: Session, claim_id: str) -> ChatSession | None:
+        sessions = db.scalars(
+            select(ChatSession)
+            .order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+            .limit(100)
+        ).all()
+        for session in sessions:
+            if session.active is not False and session.claim_id == claim_id:
+                return session
+        return None
+
+    def _recent_messages(self, db: Session, session_id: str, *, limit: int = 10) -> list[ChatMessage]:
+        messages = db.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
+        ).all()
+        return list(reversed(messages))
+
+    def _store_exchange(
+        self,
+        db: Session,
+        *,
+        session: ChatSession | None,
+        question: str,
+        answer: str,
+    ) -> None:
+        if not session:
+            return
+
+        now = self._utc_now()
+        db.add_all(
+            [
+                ChatMessage(
+                    id=str(uuid4()),
+                    session_id=session.id,
+                    role="user",
+                    content=question,
+                    created_at=now,
+                ),
+                ChatMessage(
+                    id=str(uuid4()),
+                    session_id=session.id,
+                    role="assistant",
+                    content=answer,
+                    created_at=now,
+                ),
+            ]
+        )
+        session.updated_at = now
+        db.commit()
+
+    def _utc_now(self) -> datetime:
+        return datetime.now(UTC).replace(tzinfo=None)
+
+    def _build_context(
+        self,
+        db: Session,
+        *,
+        question: str,
+        claim_id: str | None,
+        history: list[ChatMessage] | None = None,
+    ) -> tuple[str, list[str]]:
         lines: list[str] = []
         sources = ["scores_fraude", "alertas", "siniestros"]
+
+        if history:
+            sources.extend(["sesiones_chat", "mensajes_chat"])
+            lines.append("Historial reciente de la conversacion:")
+            for message in history:
+                role = "Analista" if message.role == "user" else "Agente"
+                lines.append(f"{role}: {message.content}")
+            lines.append("Fin del historial reciente.")
 
         if claim_id:
             claim = self.claims.get_by_id(db, claim_id)
