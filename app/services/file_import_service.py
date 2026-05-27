@@ -7,6 +7,7 @@ from decimal import Decimal
 from io import BytesIO
 from io import StringIO
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from fastapi import UploadFile
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.domain import ClaimDocument
 from app.schemas.claims import ClaimCreate
 from app.schemas.claims import ClaimDocumentCreate
@@ -60,7 +62,91 @@ DATASET_REQUIRED_COLUMNS = {
     "documents": {"id_documento", "id_siniestro"},
 }
 
-DATASET_EXCLUSIVE_COLUMNS = {
+DATASET_COLUMN_ALIASES = {
+    "insureds": {
+        "id_asegurado": {"id_asegurado", "id"},
+        "segmento": {"segmento", "segment"},
+        "antiguedad_meses": {"antiguedad_meses", "seniority_months"},
+        "ciudad": {"ciudad", "city"},
+        "num_polizas": {"num_polizas", "policy_count"},
+        "reclamos_12m": {"reclamos_12m", "claims_12m"},
+        "mora_actual": {"mora_actual", "current_delinquency"},
+        "score_cliente": {"score_cliente", "client_score"},
+    },
+    "providers": {
+        "id_proveedor": {"id_proveedor", "id"},
+        "nombre": {"nombre", "name"},
+        "tipo": {"tipo", "provider_type"},
+        "ciudad": {"ciudad", "city"},
+        "reclamos_asociados": {"reclamos_asociados", "associated_claims"},
+        "monto_promedio": {"monto_promedio", "average_amount"},
+        "pct_casos_observados": {"pct_casos_observados", "observed_cases_pct"},
+        "antiguedad_meses": {"antiguedad_meses", "seniority_months"},
+        "en_lista_restrictiva": {"en_lista_restrictiva", "is_restricted"},
+    },
+    "policies": {
+        "id_poliza": {"id_poliza", "id"},
+        "id_asegurado": {"id_asegurado", "insured_id"},
+        "ramo": {"ramo", "branch"},
+        "fecha_inicio": {"fecha_inicio", "start_date"},
+        "fecha_fin": {"fecha_fin", "end_date"},
+        "prima": {"prima", "premium_amount"},
+        "suma_asegurada": {"suma_asegurada", "insured_amount"},
+        "deducible": {"deducible", "deductible"},
+        "canal_venta": {"canal_venta", "sales_channel"},
+        "ciudad": {"ciudad", "city"},
+        "estado_poliza": {"estado_poliza", "status"},
+    },
+    "vehicles": {
+        "id_vehiculo": {"id_vehiculo", "id"},
+        "id_poliza": {"id_poliza", "policy_id"},
+        "placa": {"placa", "plate"},
+        "chasis": {"chasis", "chassis"},
+        "motor": {"motor", "engine"},
+        "marca": {"marca", "brand"},
+        "modelo": {"modelo", "model"},
+        "anio": {"anio", "year"},
+        "color": {"color"},
+    },
+    "claims": {
+        "id_siniestro": {"id_siniestro", "id"},
+        "id_poliza": {"id_poliza", "policy_id"},
+        "id_asegurado": {"id_asegurado", "insured_id"},
+        "id_proveedor": {"id_proveedor", "provider_id"},
+        "ramo": {"ramo", "branch"},
+        "cobertura": {"cobertura", "coverage"},
+        "fecha_ocurrencia": {"fecha_ocurrencia", "occurrence_date"},
+        "fecha_reporte": {"fecha_reporte", "reported_date"},
+        "monto_reclamado": {"monto_reclamado", "claimed_amount"},
+        "monto_estimado": {"monto_estimado", "estimated_amount"},
+        "monto_pagado": {"monto_pagado", "paid_amount"},
+        "estado": {"estado", "status"},
+        "sucursal": {"sucursal", "office"},
+        "descripcion": {"descripcion", "description"},
+        "documentos_completos": {"documentos_completos", "documents_complete"},
+        "dias_desde_inicio_poliza": {"dias_desde_inicio_poliza", "days_from_policy_start"},
+        "dias_desde_fin_poliza": {"dias_desde_fin_poliza", "days_from_policy_end"},
+        "dias_entre_ocurrencia_reporte": {"dias_entre_ocurrencia_reporte", "report_delay_days"},
+        "historial_siniestros_asegurado": {"historial_siniestros_asegurado", "insured_claim_history"},
+    },
+    "documents": {
+        "id_documento": {"id_documento", "id"},
+        "id_siniestro": {"id_siniestro", "claim_id"},
+        "tipo_documento": {"tipo_documento", "document_type"},
+        "entregado": {"entregado", "delivered"},
+        "legible": {"legible"},
+        "fecha_emision": {"fecha_emision", "issue_date"},
+        "inconsistencia_detectada": {"inconsistencia_detectada", "inconsistency_detected"},
+        "observacion": {"observacion", "notes"},
+    },
+}
+
+DATASET_ALLOWED_COLUMNS = {
+    dataset: {alias for aliases in columns.values() for alias in aliases}
+    for dataset, columns in DATASET_COLUMN_ALIASES.items()
+}
+
+DATASET_SIGNATURE_COLUMN_KEYS = {
     "insureds": {"segmento", "num_polizas", "reclamos_12m", "mora_actual", "score_cliente"},
     "providers": {
         "nombre",
@@ -108,12 +194,41 @@ DATASET_EXCLUSIVE_COLUMNS = {
     },
 }
 
+DATASET_SIGNATURE_COLUMNS = {
+    dataset: {
+        alias
+        for canonical in columns
+        for alias in DATASET_COLUMN_ALIASES[dataset].get(canonical, {canonical})
+    }
+    for dataset, columns in DATASET_SIGNATURE_COLUMN_KEYS.items()
+}
+
+DATASET_REQUIRED_COLUMN_GROUPS = {
+    dataset: {
+        canonical: DATASET_COLUMN_ALIASES[dataset].get(canonical, {canonical})
+        for canonical in required_columns
+    }
+    for dataset, required_columns in DATASET_REQUIRED_COLUMNS.items()
+}
+
+
+class _ImportTimeoutGuard:
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
+
+    def __call__(self) -> None:
+        if self.deadline is not None and monotonic() > self.deadline:
+            raise TimeoutError(
+                f"La importacion supero el timeout configurado de {self.timeout_seconds:.0f} segundos."
+            )
+
 
 class FileImportService:
     def __init__(self, import_service: ImportService | None = None) -> None:
         self.import_service = import_service or ImportService()
 
-    async def import_file(
+    def import_file(
         self,
         db: Session,
         file: UploadFile,
@@ -122,7 +237,10 @@ class FileImportService:
         reset: bool = False,
         recalculate_scores: bool = True,
     ) -> FileImportResponse:
-        content = await file.read()
+        guard = _ImportTimeoutGuard(settings.import_timeout_seconds)
+        guard()
+
+        content = file.file.read()
         filename = file.filename or "archivo"
         suffix = Path(filename).suffix.lower()
 
@@ -133,13 +251,26 @@ class FileImportService:
         else:
             raise ValueError("Formato no soportado. Usa .csv, .xlsx o .xlsm.")
 
+        self._validate_row_limit(rows_by_dataset)
+        guard()
+
         payload, standalone_documents = self._payload_from_rows(rows_by_dataset)
-        result = self.import_service.import_payload(db, payload, reset=reset, assess_claims=recalculate_scores)
+        result = self.import_service.import_payload(
+            db,
+            payload,
+            reset=reset,
+            assess_claims=recalculate_scores,
+            use_embeddings=False,
+            should_continue=guard,
+        )
         document_claim_ids = self._import_standalone_documents(db, standalone_documents)
         if recalculate_scores and document_claim_ids:
-            for claim_id in document_claim_ids:
-                self.import_service.risk_service.assess_claim(db, claim_id)
-            result["assessments"] += len(document_claim_ids)
+            result["assessments"] += self.import_service.risk_service.assess_claims(
+                db,
+                sorted(document_claim_ids),
+                use_embeddings=False,
+                should_continue=guard,
+            )
 
         return FileImportResponse(
             message="Archivo importado correctamente",
@@ -150,22 +281,89 @@ class FileImportService:
 
     def _read_csv(self, content: bytes, *, filename: str, dataset: str | None) -> dict[str, list[dict[str, Any]]]:
         filename_dataset = self._resolve_dataset(Path(filename).stem, required=False)
-        dataset_key = self._resolve_dataset(dataset or Path(filename).stem)
-        if dataset and filename_dataset and filename_dataset != dataset_key:
-            raise ValueError(
-                f"El archivo '{filename}' corresponde a {DATASET_LABELS[filename_dataset]}, "
-                f"pero seleccionaste dataset={DATASET_LABELS[dataset_key]}. "
-                "Corrige el dataset o cambia el nombre del archivo."
-            )
 
         text = self._decode_text(content)
         sample = text[:2048]
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;|\t") if sample.strip() else csv.excel
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;|\t") if sample.strip() else csv.excel
+        except csv.Error:
+            dialect = csv.excel
         reader = csv.DictReader(StringIO(text), dialect=dialect)
         headers = {self._normalize_header(header) for header in reader.fieldnames or [] if header}
+        dataset_key = self._resolve_csv_dataset(
+            dataset=dataset,
+            filename=filename,
+            filename_dataset=filename_dataset,
+            headers=headers,
+        )
         self._validate_headers(dataset_key, headers, source=filename)
         rows = [self._clean_row(row) for row in reader]
         return {dataset_key: rows}
+
+    def _resolve_csv_dataset(
+        self,
+        *,
+        dataset: str | None,
+        filename: str,
+        filename_dataset: str | None,
+        headers: set[str],
+    ) -> str:
+        if dataset:
+            dataset_key = self._resolve_dataset(dataset)
+            if filename_dataset and filename_dataset != dataset_key:
+                raise ValueError(
+                    f"El archivo '{filename}' corresponde a {DATASET_LABELS[filename_dataset]}, "
+                    f"pero seleccionaste dataset={DATASET_LABELS[dataset_key]}. "
+                    "Corrige el dataset o cambia el nombre del archivo."
+                )
+            return dataset_key
+
+        if filename_dataset:
+            return filename_dataset
+
+        return self._infer_dataset_from_headers(headers, source=filename)
+
+    def _infer_dataset_from_headers(self, headers: set[str], *, source: str) -> str:
+        headers = {header for header in headers if header}
+        if not headers:
+            raise ValueError(f"{source}: el archivo no tiene encabezados.")
+
+        candidates: list[tuple[int, str]] = []
+        for dataset in DATASET_ORDER:
+            missing = self._missing_required_headers(dataset, headers)
+            incompatible = self._incompatible_header_messages(dataset, headers)
+            if missing or incompatible:
+                continue
+            score = len(headers & DATASET_ALLOWED_COLUMNS[dataset]) + len(headers & DATASET_SIGNATURE_COLUMNS[dataset])
+            candidates.append((score, dataset))
+
+        if not candidates:
+            allowed = ", ".join(DATASET_LABELS[dataset] for dataset in DATASET_ORDER)
+            raise ValueError(
+                f"{source}: no se pudo detectar automaticamente el dataset por nombre ni por columnas. "
+                f"Usa un nombre de archivo como {allowed} o envia encabezados reconocibles. "
+                f"Columnas recibidas: {', '.join(sorted(headers))}."
+            )
+
+        candidates.sort(reverse=True)
+        best_score, dataset = candidates[0]
+        tied = [candidate for score, candidate in candidates if score == best_score]
+        if len(tied) > 1:
+            labels = ", ".join(DATASET_LABELS[candidate] for candidate in tied)
+            raise ValueError(
+                f"{source}: columnas ambiguas para detectar dataset automaticamente ({labels}). "
+                "Usa un nombre de archivo reconocido o encabezados mas especificos."
+            )
+
+        return dataset
+
+    def _validate_row_limit(self, rows_by_dataset: dict[str, list[dict[str, Any]]]) -> None:
+        total_rows = sum(len(rows) for rows in rows_by_dataset.values())
+        if settings.import_max_rows > 0 and total_rows > settings.import_max_rows:
+            raise ValueError(
+                f"El archivo contiene {total_rows} filas importables y supera el limite "
+                f"configurado de {settings.import_max_rows}. Divide la carga en lotes mas pequenos."
+            )
 
     def _read_excel(self, content: bytes, *, dataset: str | None) -> dict[str, list[dict[str, Any]]]:
         try:
@@ -393,16 +591,8 @@ class FileImportService:
         if not headers:
             raise ValueError(f"{source}: el archivo no tiene encabezados.")
 
-        missing = DATASET_REQUIRED_COLUMNS[dataset] - headers
-        incompatible_messages: list[str] = []
-        for other_dataset, exclusive_columns in DATASET_EXCLUSIVE_COLUMNS.items():
-            if other_dataset == dataset:
-                continue
-            present = sorted(headers & exclusive_columns)
-            if present:
-                incompatible_messages.append(
-                    f"columnas de {DATASET_LABELS[other_dataset]}: {', '.join(present[:6])}"
-                )
+        missing = self._missing_required_headers(dataset, headers)
+        incompatible_messages = self._incompatible_header_messages(dataset, headers)
 
         if missing or incompatible_messages:
             message = (
@@ -414,6 +604,27 @@ class FileImportService:
                 message += f" Se detectaron { '; '.join(incompatible_messages[:3]) }."
             message += f" Columnas recibidas: {', '.join(sorted(headers))}."
             raise ValueError(message)
+
+    def _missing_required_headers(self, dataset: str, headers: set[str]) -> set[str]:
+        required_groups = DATASET_REQUIRED_COLUMN_GROUPS[dataset]
+        return {
+            canonical
+            for canonical, aliases in required_groups.items()
+            if not headers & aliases
+        }
+
+    def _incompatible_header_messages(self, dataset: str, headers: set[str]) -> list[str]:
+        incompatible_messages: list[str] = []
+        allowed_columns = DATASET_ALLOWED_COLUMNS[dataset]
+        for other_dataset, signature_columns in DATASET_SIGNATURE_COLUMNS.items():
+            if other_dataset == dataset:
+                continue
+            present = sorted((headers - allowed_columns) & signature_columns)
+            if present:
+                incompatible_messages.append(
+                    f"columnas de {DATASET_LABELS[other_dataset]}: {', '.join(present[:6])}"
+                )
+        return incompatible_messages
 
     def _decode_text(self, content: bytes) -> str:
         for encoding in ("utf-8-sig", "utf-8", "latin-1"):

@@ -1,4 +1,8 @@
+from collections.abc import Callable
+from typing import Any
+
 from sqlalchemy import delete
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.domain import Claim
@@ -24,28 +28,38 @@ class ImportService:
         *,
         reset: bool = False,
         assess_claims: bool = True,
+        use_embeddings: bool = False,
+        should_continue: Callable[[], None] | None = None,
     ) -> dict[str, int]:
+        if should_continue:
+            should_continue()
         if reset:
             self._clear_data(db)
 
-        for insured in payload.insureds:
-            db.merge(Insured(**insured.model_dump()))
-
-        for provider in payload.providers:
-            db.merge(Provider(**provider.model_dump()))
-
-        for policy in payload.policies:
-            db.merge(Policy(**policy.model_dump()))
-
-        for vehicle in payload.vehicles:
-            db.merge(Vehicle(**vehicle.model_dump()))
-
-        db.flush()
+        self._bulk_upsert(db, Insured, [insured.model_dump() for insured in payload.insureds])
+        self._bulk_upsert(db, Provider, [provider.model_dump() for provider in payload.providers])
+        self._bulk_upsert(db, Policy, [policy.model_dump() for policy in payload.policies])
+        self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles])
 
         policies_by_id = {policy.id: policy for policy in payload.policies}
+        missing_policy_ids = {
+            claim.policy_id
+            for claim in payload.claims
+            if claim.policy_id not in policies_by_id
+        }
+        if missing_policy_ids:
+            policies_by_id.update(
+                {
+                    policy.id: policy
+                    for policy in db.scalars(select(Policy).where(Policy.id.in_(missing_policy_ids))).all()
+                }
+            )
+
+        claim_mappings: list[dict[str, Any]] = []
+        document_mappings: list[dict[str, Any]] = []
         for claim_payload in payload.claims:
             claim_data = claim_payload.model_dump(exclude={"documents"})
-            policy = policies_by_id.get(claim_payload.policy_id) or db.get(Policy, claim_payload.policy_id)
+            policy = policies_by_id.get(claim_payload.policy_id)
             if policy and claim_payload.occurrence_date:
                 if claim_data["days_from_policy_start"] is None:
                     claim_data["days_from_policy_start"] = (claim_payload.occurrence_date - policy.start_date).days
@@ -59,20 +73,31 @@ class ImportService:
                     for document in claim_payload.documents
                 )
 
-            claim = db.merge(Claim(**claim_data))
-            db.flush()
+            claim_mappings.append(claim_data)
+            document_mappings.extend(
+                {"claim_id": claim_payload.id, **document.model_dump()}
+                for document in claim_payload.documents
+            )
 
-            db.query(ClaimDocument).filter(ClaimDocument.claim_id == claim.id).delete()
-            for document in claim_payload.documents:
-                db.add(ClaimDocument(claim_id=claim.id, **document.model_dump()))
+        claim_ids = [claim["id"] for claim in claim_mappings]
+        if claim_ids:
+            db.execute(delete(ClaimDocument).where(ClaimDocument.claim_id.in_(claim_ids)))
+        self._bulk_upsert(db, Claim, claim_mappings)
+        if document_mappings:
+            db.bulk_insert_mappings(ClaimDocument, document_mappings)
 
+        if should_continue:
+            should_continue()
         db.commit()
 
         assessments = 0
         if assess_claims:
-            for claim in payload.claims:
-                self.risk_service.assess_claim(db, claim.id)
-                assessments += 1
+            assessments = self.risk_service.assess_claims(
+                db,
+                [claim.id for claim in payload.claims],
+                use_embeddings=use_embeddings,
+                should_continue=should_continue,
+            )
 
         return {
             "insureds": len(payload.insureds),
@@ -93,3 +118,19 @@ class ImportService:
         db.execute(delete(Provider))
         db.execute(delete(Insured))
         db.flush()
+
+    def _bulk_upsert(self, db: Session, model: type, mappings: list[dict[str, Any]]) -> None:
+        if not mappings:
+            return
+
+        deduplicated = {mapping["id"]: mapping for mapping in mappings}
+        records = list(deduplicated.values())
+        record_ids = list(deduplicated)
+        existing_ids = set(db.scalars(select(model.id).where(model.id.in_(record_ids))).all())
+        inserts = [record for record in records if record["id"] not in existing_ids]
+        updates = [record for record in records if record["id"] in existing_ids]
+
+        if inserts:
+            db.bulk_insert_mappings(model, inserts)
+        if updates:
+            db.bulk_update_mappings(model, updates)

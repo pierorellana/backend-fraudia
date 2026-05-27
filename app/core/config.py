@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = "bge-m3"
     ollama_timeout_seconds: float = 45.0
 
+    import_max_rows: int = 5000
+    import_timeout_seconds: float = 60.0
+
     model_config = SettingsConfigDict(
         env_file=(".env", "backend/.env"),
         env_file_encoding="utf-8",

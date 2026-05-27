@@ -115,13 +115,19 @@ El frontend debe leer la informacion funcional desde `data`.
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri "http://127.0.0.1:8000/api/imports/file?dataset=siniestros&recalculate_scores=true" `
+  -Uri "http://127.0.0.1:8000/api/imports/file" `
   -Form @{ file = Get-Item ".\siniestros.csv" }
 ```
 
 En Swagger, abre `POST /api/imports/file`, presiona `Try it out`, selecciona el archivo en `file` y ejecuta.
 
-Para CSV, cada archivo representa una tabla y debes indicar `dataset`:
+Para CSV, cada archivo representa una tabla. El backend detecta el dataset automaticamente en este orden:
+
+1. Parametro opcional `dataset`, si el frontend lo envia.
+2. Nombre del archivo, por ejemplo `siniestros.csv` o `vehiculos.csv`.
+3. Encabezados del CSV, si el nombre es generico como `carga.csv`.
+
+Nombres recomendados para drag and drop:
 
 ```text
 asegurados
@@ -135,7 +141,8 @@ documentos
 Validaciones de seguridad:
 
 - Si el archivo se llama `vehiculos.csv` y seleccionas `dataset=asegurados`, la API rechaza la carga.
-- Si usas un nombre generico como `carga.csv`, la API valida columnas obligatorias e incompatibles antes de insertar.
+- Si usas un nombre generico como `carga.csv`, la API intenta detectar el dataset por columnas y valida obligatorias e incompatibles antes de insertar.
+- Si las columnas son ambiguas, devuelve `422` y pide usar un nombre de archivo reconocido o encabezados mas especificos.
 - Si faltan columnas clave, devuelve `422` con un mensaje indicando columnas faltantes y columnas recibidas.
 
 Para Excel, puedes subir un `.xlsx` con hojas llamadas igual que las tablas anteriores. El backend importara las hojas reconocidas en orden: asegurados, proveedores, polizas, vehiculos, siniestros y documentos.
@@ -143,10 +150,19 @@ Para Excel, puedes subir un `.xlsx` con hojas llamadas igual que las tablas ante
 Parametros importantes:
 
 ```text
-dataset            Requerido para CSV si el nombre del archivo no coincide con la tabla.
-reset              Borra datos antes de importar. Por seguridad viene en false.
-recalculate_scores Recalcula score para siniestros importados. Viene en true.
+dataset            Opcional. Si se omite, se detecta por nombre de archivo o columnas.
 ```
+
+El endpoint de archivos no borra datos existentes y recalcula scores automaticamente para los siniestros/documentos importados.
+
+Para cargas grandes, el importador valida un limite de filas y un timeout configurable:
+
+```text
+IMPORT_MAX_ROWS        Maximo de filas importables por archivo. Usa 0 para desactivar el limite.
+IMPORT_TIMEOUT_SECONDS Tiempo maximo de procesamiento de una importacion. Usa 0 para desactivarlo.
+```
+
+El recalculo de scores durante imports no usa embeddings de Ollama para evitar llamadas externas masivas. Si necesitas similitud semantica con embeddings, usa el endpoint individual de evaluacion luego de importar.
 
 ## Endpoints principales
 

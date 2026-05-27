@@ -38,29 +38,28 @@ def import_batch(
 
 
 @router.post("/file", response_model=GeneralResponse[FileImportResponse])
-async def import_file(
+def import_file(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     dataset: str | None = Query(
         default=None,
-        description="Requerido para CSV si el nombre del archivo no coincide con la tabla.",
+        description="Opcional. Si se omite, el backend detecta el dataset por nombre de archivo o columnas.",
     ),
-    reset: bool = Query(default=False, description="Borra datos existentes antes de importar. Usar con cuidado."),
-    recalculate_scores: bool = Query(default=True, description="Recalcula score para siniestros importados."),
 ) -> GeneralResponse[FileImportResponse]:
     try:
         return success_response(
-            await file_import_service.import_file(
+            file_import_service.import_file(
                 db,
                 file,
                 dataset=dataset,
-                reset=reset,
-                recalculate_scores=recalculate_scores,
             )
         )
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="El archivo referencia registros inexistentes o duplicados.") from exc
+    except TimeoutError as exc:
+        db.rollback()
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
