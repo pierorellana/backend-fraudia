@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm import selectinload
 
+from app.models.domain import ClaimDocument
 from app.models.domain import Claim
+from app.models.domain import Insured
 from app.models.domain import Policy
+from app.models.domain import Provider
+from app.models.domain import RiskAlert
 from app.models.domain import RiskAssessment
+from app.models.domain import Vehicle
 from app.models.enums import RiskLevel
 
 
@@ -17,15 +25,99 @@ class ClaimRepository:
         return self.get_by_identifier(db, claim_id)
 
     def get_by_identifier(self, db: Session, claim_identifier: str) -> Claim | None:
+        normalized_identifier = claim_identifier.strip()
+        code_identifier = normalized_identifier.upper()
+        filters = [Claim.code == code_identifier]
+        if _is_uuid(normalized_identifier):
+            filters.append(Claim.id == normalized_identifier)
+
         return db.scalars(
             select(Claim)
-            .where(or_(Claim.id == claim_identifier, Claim.code == claim_identifier))
+            .where(or_(*filters))
             .options(
-                selectinload(Claim.documents),
-                selectinload(Claim.policy).selectinload(Policy.vehicles),
-                selectinload(Claim.insured),
-                selectinload(Claim.provider),
-                selectinload(Claim.risk_assessment).selectinload(RiskAssessment.alerts),
+                load_only(
+                    Claim.code,
+                    Claim.policy_id,
+                    Claim.insured_id,
+                    Claim.provider_id,
+                    Claim.branch,
+                    Claim.coverage,
+                    Claim.occurrence_date,
+                    Claim.reported_date,
+                    Claim.claimed_amount,
+                    Claim.estimated_amount,
+                    Claim.paid_amount,
+                    Claim.status,
+                    Claim.office,
+                    Claim.description,
+                    Claim.documents_complete,
+                    Claim.days_from_policy_start,
+                    Claim.days_from_policy_end,
+                    Claim.report_delay_days,
+                    Claim.insured_claim_history,
+                ),
+                selectinload(Claim.documents).load_only(
+                    ClaimDocument.document_type,
+                    ClaimDocument.delivered,
+                    ClaimDocument.legible,
+                    ClaimDocument.issue_date,
+                    ClaimDocument.inconsistency_detected,
+                    ClaimDocument.notes,
+                ),
+                selectinload(Claim.policy)
+                .load_only(
+                    Policy.code,
+                    Policy.branch,
+                    Policy.start_date,
+                    Policy.end_date,
+                    Policy.premium_amount,
+                    Policy.insured_amount,
+                    Policy.deductible,
+                    Policy.sales_channel,
+                    Policy.city,
+                    Policy.status,
+                )
+                .selectinload(Policy.vehicles)
+                .load_only(Vehicle.plate),
+                selectinload(Claim.insured).load_only(
+                    Insured.code,
+                    Insured.segment,
+                    Insured.seniority_months,
+                    Insured.city,
+                    Insured.policy_count,
+                    Insured.claims_12m,
+                    Insured.current_delinquency,
+                    Insured.client_score,
+                ),
+                selectinload(Claim.provider).load_only(
+                    Provider.code,
+                    Provider.name,
+                    Provider.provider_type,
+                    Provider.city,
+                    Provider.associated_claims,
+                    Provider.average_amount,
+                    Provider.observed_cases_pct,
+                    Provider.seniority_months,
+                    Provider.is_restricted,
+                ),
+                selectinload(Claim.risk_assessment)
+                .load_only(
+                    RiskAssessment.score,
+                    RiskAssessment.level,
+                    RiskAssessment.calculated_at,
+                    RiskAssessment.model_version,
+                    RiskAssessment.explanation,
+                    RiskAssessment.reviewed_by_analyst,
+                )
+                .selectinload(RiskAssessment.alerts)
+                .load_only(
+                    RiskAlert.code,
+                    RiskAlert.category,
+                    RiskAlert.severity,
+                    RiskAlert.points,
+                    RiskAlert.description,
+                    RiskAlert.recommendation,
+                ),
             )
         ).first()
 
@@ -93,3 +185,11 @@ class ClaimRepository:
                 .limit(limit)
             ).all()
         )
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True

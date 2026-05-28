@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from decimal import Decimal
 import math
+from uuid import UUID
 from uuid import uuid4
 
 from sqlalchemy import delete
@@ -11,11 +12,14 @@ from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models.domain import Claim
+from app.models.domain import ClaimDocument
 from app.models.domain import Policy
+from app.models.domain import Provider
 from app.models.domain import RiskAlert
 from app.models.domain import RiskAssessment
 from app.models.domain import Vehicle
@@ -36,7 +40,7 @@ class RiskService:
         db: Session,
         claim_id: str,
         *,
-        use_embeddings: bool = True,
+        use_embeddings: bool = False,
         commit: bool = True,
         should_continue: Callable[[], None] | None = None,
     ) -> RiskAssessment:
@@ -48,14 +52,9 @@ class RiskService:
         if should_continue:
             should_continue()
 
-        existing = db.scalars(
-            select(RiskAssessment)
-            .where(RiskAssessment.claim_id == claim.id)
-            .options(selectinload(RiskAssessment.alerts))
-        ).first()
-        if existing:
-            db.delete(existing)
-            db.flush()
+        db.execute(delete(RiskAlert).where(RiskAlert.claim_id == claim.id))
+        db.execute(delete(RiskAssessment).where(RiskAssessment.claim_id == claim.id))
+        db.flush()
 
         assessment = RiskAssessment(
             id=str(uuid4()),
@@ -91,7 +90,7 @@ class RiskService:
         db: Session,
         claim_ids: list[str],
         *,
-        use_embeddings: bool = True,
+        use_embeddings: bool = False,
         should_continue: Callable[[], None] | None = None,
     ) -> int:
         unique_claim_ids = list(dict.fromkeys(claim_ids))
@@ -103,11 +102,7 @@ class RiskService:
         claims = db.scalars(
             select(Claim)
             .where(Claim.id.in_(unique_claim_ids))
-            .options(
-                selectinload(Claim.policy).selectinload(Policy.vehicles),
-                selectinload(Claim.provider),
-                selectinload(Claim.documents),
-            )
+            .options(*self._claim_assessment_options())
         ).all()
         claims_by_id = {claim.id: claim for claim in claims}
         missing_claim_ids = [claim_id for claim_id in unique_claim_ids if claim_id not in claims_by_id]
@@ -155,14 +150,15 @@ class RiskService:
         return len(unique_claim_ids)
 
     def _get_claim_for_assessment(self, db: Session, claim_id: str) -> Claim:
+        normalized_identifier = claim_id.strip()
+        filters = [Claim.code == normalized_identifier.upper()]
+        if _is_uuid(normalized_identifier):
+            filters.append(Claim.id == normalized_identifier)
+
         claim = db.scalars(
             select(Claim)
-            .where(or_(Claim.id == claim_id, Claim.code == claim_id))
-            .options(
-                selectinload(Claim.policy).selectinload(Policy.vehicles),
-                selectinload(Claim.provider),
-                selectinload(Claim.documents),
-            )
+            .where(or_(*filters))
+            .options(*self._claim_assessment_options())
         ).first()
         if not claim:
             raise LookupError(f"Claim {claim_id} was not found")
@@ -172,13 +168,70 @@ class RiskService:
         assessment = db.scalars(
             select(RiskAssessment)
             .where(RiskAssessment.claim_id == claim_id)
-            .options(selectinload(RiskAssessment.alerts))
+            .options(
+                load_only(
+                    RiskAssessment.score,
+                    RiskAssessment.level,
+                    RiskAssessment.calculated_at,
+                    RiskAssessment.model_version,
+                    RiskAssessment.explanation,
+                    RiskAssessment.reviewed_by_analyst,
+                ),
+                selectinload(RiskAssessment.alerts).load_only(
+                    RiskAlert.code,
+                    RiskAlert.category,
+                    RiskAlert.severity,
+                    RiskAlert.points,
+                    RiskAlert.description,
+                    RiskAlert.recommendation,
+                ),
+            )
         ).first()
         if not assessment:
             raise LookupError(f"Risk assessment for claim {claim_id} was not found")
         return assessment
 
-    def _build_context(self, db: Session, claim: Claim, *, use_embeddings: bool = True) -> RiskContext:
+    def _claim_assessment_options(self):
+        return (
+            load_only(
+                Claim.id,
+                Claim.code,
+                Claim.policy_id,
+                Claim.insured_id,
+                Claim.provider_id,
+                Claim.branch,
+                Claim.coverage,
+                Claim.occurrence_date,
+                Claim.reported_date,
+                Claim.claimed_amount,
+                Claim.description,
+                Claim.days_from_policy_start,
+                Claim.days_from_policy_end,
+                Claim.report_delay_days,
+            ),
+            selectinload(Claim.policy)
+            .load_only(
+                Policy.id,
+                Policy.start_date,
+                Policy.end_date,
+                Policy.insured_amount,
+            )
+            .selectinload(Policy.vehicles)
+            .load_only(Vehicle.plate),
+            selectinload(Claim.provider).load_only(
+                Provider.id,
+                Provider.name,
+                Provider.is_restricted,
+            ),
+            selectinload(Claim.documents).load_only(
+                ClaimDocument.document_type,
+                ClaimDocument.delivered,
+                ClaimDocument.legible,
+                ClaimDocument.inconsistency_detected,
+            ),
+        )
+
+    def _build_context(self, db: Session, claim: Claim, *, use_embeddings: bool = False) -> RiskContext:
         insured_claim_count = self._count_claims(db, Claim.insured_id == claim.insured_id)
         vehicle_claim_count = 0
         if claim.vehicle_plate:
@@ -230,7 +283,7 @@ class RiskService:
         db: Session,
         claims: list[Claim],
         *,
-        use_embeddings: bool = True,
+        use_embeddings: bool = False,
     ) -> dict[str, RiskContext]:
         insured_ids = {claim.insured_id for claim in claims if claim.insured_id}
         provider_ids = {claim.provider_id for claim in claims if claim.provider_id}
@@ -357,7 +410,7 @@ class RiskService:
         db: Session,
         claims: list[Claim],
         *,
-        use_embeddings: bool = True,
+        use_embeddings: bool = False,
     ) -> dict[str, tuple[str | None, float]]:
         if use_embeddings and settings.ollama_enabled and settings.ollama_embeddings_enabled:
             return {
@@ -420,11 +473,12 @@ class RiskService:
     def _count_claims(self, db: Session, criterion) -> int:
         return int(db.scalar(select(func.count(Claim.id)).where(criterion)) or 0)
 
-    def _find_similar_claim(self, db: Session, claim: Claim, *, use_embeddings: bool = True) -> tuple[str | None, float]:
+    def _find_similar_claim(self, db: Session, claim: Claim, *, use_embeddings: bool = False) -> tuple[str | None, float]:
+        candidate_limit = 25 if use_embeddings and settings.ollama_enabled and settings.ollama_embeddings_enabled else 250
         candidates = db.execute(
             select(Claim.id, Claim.description)
             .where(Claim.id != claim.id, Claim.branch == claim.branch)
-            .limit(250)
+            .limit(candidate_limit)
         ).all()
         if use_embeddings and settings.ollama_enabled and settings.ollama_embeddings_enabled:
             embedding_result = self._find_similar_claim_with_embeddings(claim, candidates)
@@ -461,3 +515,11 @@ class RiskService:
         if best_score < 0.78:
             return None
         return best_id, best_score
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True

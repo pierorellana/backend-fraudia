@@ -155,10 +155,6 @@ def test_import_service_and_top_risk_cases() -> None:
         assert float(claim["score"]) >= 76
         assert claim["nivel_riesgo"] == "rojo"
 
-        top_alias = client.get("/api/top-risk?limit=1")
-        assert top_alias.status_code == 200
-        assert top_alias.json()["data"][0]["code"] == CLAIM_CODE
-
         listed = client.get("/api/claims?limit=10")
         assert listed.status_code == 200
         listed_claim = listed.json()["data"]["items"][0]
@@ -169,11 +165,92 @@ def test_import_service_and_top_risk_cases() -> None:
         detail = client.get(f"/api/claims/{CLAIM_CODE}")
         assert detail.status_code == 200
         detail_data = detail.json()["data"]
-        assert detail_data["id"] == CLAIM_ID
         assert detail_data["code"] == CLAIM_CODE
+        assert "id" not in detail_data
+        assert "policy_id" not in detail_data
+        assert "insured_id" not in detail_data
+        assert "provider_id" not in detail_data
         assert detail_data["insured"]["code"] == INSURED_CODE
         assert detail_data["policy"]["code"] == POLICY_CODE
         assert detail_data["provider"]["code"] == PROVIDER_CODE
+        assert "id" not in detail_data["insured"]
+        assert "id" not in detail_data["policy"]
+        assert "id" not in detail_data["provider"]
+
+
+def test_assess_claim_by_code_returns_light_payload_without_embeddings(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ollama_enabled", True)
+    monkeypatch.setattr(settings, "ollama_embeddings_enabled", True)
+
+    def fail_if_called(self, text: str) -> list[float] | None:
+        raise AssertionError("Ollama embeddings should be opt-in for single claim assessment")
+
+    monkeypatch.setattr(OllamaClient, "embed", fail_if_called)
+    payload = base_payload()
+    payload["claims"] = [
+        {
+            "id": CLAIM_ID,
+            "code": CLAIM_CODE,
+            "policy_id": POLICY_ID,
+            "insured_id": INSURED_ID,
+            "provider_id": PROVIDER_ID,
+            "branch": "Vehiculos",
+            "coverage": "Robo",
+            "occurrence_date": "2026-01-03",
+            "reported_date": "2026-01-10",
+            "claimed_amount": "24000",
+            "estimated_amount": "24500",
+            "status": "Reserva",
+            "office": "Quito Norte",
+            "description": "Robo total del vehiculo durante madrugada sin testigos y con llaves dentro.",
+            "documents": [
+                {
+                    "id": "60000000-0000-0000-0000-000000000101",
+                    "document_type": "Denuncia",
+                    "delivered": True,
+                    "legible": True,
+                    "inconsistency_detected": False,
+                },
+                {
+                    "id": "60000000-0000-0000-0000-000000000102",
+                    "document_type": "Factura",
+                    "delivered": True,
+                    "legible": True,
+                    "inconsistency_detected": True,
+                },
+            ],
+        }
+    ]
+
+    with TestClient(app) as client:
+        import_test_payload(payload)
+
+        response = client.post(f"/api/claims/{CLAIM_CODE}/assess")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert set(data) == {
+            "score",
+            "level",
+            "suggested_action",
+            "explanation",
+            "model_version",
+            "reviewed_by_analyst",
+            "calculated_at",
+            "alerts",
+        }
+        assert "id" not in data
+        assert "claim_id" not in data
+        assert "signal_detail" not in data
+        assert data["alerts"]
+        assert set(data["alerts"][0]) == {
+            "code",
+            "title",
+            "category",
+            "description",
+            "points",
+            "severity",
+            "recommendation",
+        }
 
 
 def test_csv_file_import_for_claims() -> None:
@@ -328,7 +405,9 @@ def test_csv_file_import_for_documents_with_claim_id_column() -> None:
         assert claim.status_code == 200
         documents = claim.json()["data"]["documents"]
         assert len(documents) == 1
-        assert documents[0]["id"] == DOCUMENT_ID
+        assert documents[0]["document_type"] == "Denuncia"
+        assert "id" not in documents[0]
+        assert "claim_id" not in documents[0]
 
 
 def test_csv_file_import_rejects_mismatched_filename_and_dataset() -> None:

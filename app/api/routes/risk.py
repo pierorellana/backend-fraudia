@@ -10,13 +10,10 @@ from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
 
 router = APIRouter()
-top_risk_router = APIRouter()
 claims = ClaimRepository()
 
 
 @router.get("/top", response_model=GeneralResponse[list[TopRiskClaimRead]])
-@router.get("/top-risk", response_model=GeneralResponse[list[TopRiskClaimRead]])
-@top_risk_router.get("/top-risk", response_model=GeneralResponse[list[TopRiskClaimRead]])
 def top_risk_claims(
     db: Session = Depends(get_db),
     limit: int = Query(default=10, ge=1, le=50),

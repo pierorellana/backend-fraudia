@@ -175,6 +175,112 @@ class ClaimDetailRead(ClaimRead):
     provider: ProviderRead | None = None
 
 
+class ClaimDocumentDetailRead(BaseModel):
+    document_type: str | None = None
+    delivered: bool = False
+    legible: bool = True
+    issue_date: date | None = None
+    inconsistency_detected: bool = False
+    notes: str | None = None
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RiskAlertDetailRead(BaseModel):
+    code: str | None = None
+    title: str
+    category: str | None = None
+    description: str | None = None
+    points: int | None = None
+    severity: str | None = None
+    recommendation: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RiskAssessmentDetailRead(BaseModel):
+    score: Decimal | None = Field(default=None, ge=0, le=100)
+    level: str | None = None
+    suggested_action: str
+    explanation: str | None = None
+    model_version: str | None = None
+    reviewed_by_analyst: bool = False
+    calculated_at: datetime | None = None
+    alerts: list[RiskAlertDetailRead] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PolicyDetailRead(BaseModel):
+    code: str | None = None
+    branch: str
+    start_date: date
+    end_date: date
+    premium_amount: Decimal | None = None
+    insured_amount: Decimal | None = None
+    deductible: Decimal | None = None
+    sales_channel: str | None = None
+    city: str | None = None
+    status: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InsuredDetailRead(BaseModel):
+    code: str | None = None
+    segment: str | None = None
+    seniority_months: int | None = None
+    city: str | None = None
+    policy_count: int = 0
+    claims_12m: int = 0
+    current_delinquency: bool = False
+    client_score: Decimal | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderDetailRead(BaseModel):
+    code: str | None = None
+    name: str | None = None
+    provider_type: str | None = None
+    city: str | None = None
+    associated_claims: int = 0
+    average_amount: Decimal | None = None
+    observed_cases_pct: Decimal | None = None
+    seniority_months: int | None = None
+    is_restricted: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ClaimOptimizedDetailRead(BaseModel):
+    code: str | None = None
+    branch: str | None = None
+    coverage: str | None = None
+    occurrence_date: date | None = None
+    reported_date: date | None = None
+    claimed_amount: Decimal | None = None
+    estimated_amount: Decimal | None = None
+    paid_amount: Decimal | None = None
+    status: str | None = None
+    office: str | None = None
+    description: str | None = None
+    documents_complete: bool = False
+    days_from_policy_start: int | None = None
+    days_from_policy_end: int | None = None
+    report_delay_days: int | None = None
+    insured_claim_history: int = 0
+    vehicle_plate: str | None = None
+    documents: list[ClaimDocumentDetailRead] = []
+    risk_assessment: RiskAssessmentDetailRead | None = None
+    policy: PolicyDetailRead | None = None
+    insured: InsuredDetailRead | None = None
+    provider: ProviderDetailRead | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ClaimListItem(BaseModel):
     code: str | None = None
     ramo: str | None = None

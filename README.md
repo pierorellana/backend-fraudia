@@ -147,9 +147,7 @@ GET  /api/claims
 GET  /api/claims/{claim_id_or_code}
 POST /api/claims/{claim_id_or_code}/assess
 
-GET  /api/top-risk
 GET  /api/risk/top
-GET  /api/risk/top-risk
 
 GET  /api/analytics/summary
 GET  /api/analytics/providers
@@ -231,10 +229,10 @@ Validaciones principales:
 
 Durante la importación se recalculan automáticamente los scores de los siniestros cargados. Para cargas masivas no se utilizan embeddings de Ollama, ya que eso agregaría latencia y dependencia externa al proceso de carga.
 
-Si se requiere recalcular un caso específico con embeddings habilitados, se puede utilizar:
+Si se requiere recalcular un caso específico con similitud semántica habilitada, se puede utilizar el query param `use_embeddings=true`. Por defecto se mantiene desactivado para que el recálculo responda rápido y no dependa de Ollama:
 
 ```text
-POST /api/claims/{claim_id_or_code}/assess
+POST /api/claims/{claim_id_or_code}/assess?use_embeddings=true
 ```
 
 ## Columnas Esperadas
@@ -371,11 +369,42 @@ Este endpoint está pensado para la pantalla de detalle del analista.
 
 ### `POST /api/claims/{claim_id_or_code}/assess`
 
-Recalcula el score de un siniestro individual.
+Recalcula el score de un siniestro individual. El endpoint acepta UUID o `code`, pero está optimizado para que el frontend consuma el resultado por `code`.
+
+Por defecto no usa embeddings de Ollama; aplica reglas de negocio, conteos, comparación de montos y similitud textual ligera. Si necesito activar similitud semántica para un caso puntual, envío:
+
+```text
+POST /api/claims/SIN-1042/assess?use_embeddings=true
+```
+
+La respuesta es liviana y no expone UUIDs internos ni detalles técnicos del modelo como `signal_detail`. Devuelve el score recalculado, el nivel, la acción sugerida, la explicación y las alertas activadas:
+
+```json
+{
+  "score": "95.00",
+  "level": "rojo",
+  "suggested_action": "Escalar a revision especializada antifraude",
+  "explanation": "Score 95/100...",
+  "model_version": "rules-anomaly-1.0",
+  "reviewed_by_analyst": false,
+  "calculated_at": "2026-05-28T10:30:00",
+  "alerts": [
+    {
+      "code": "RF-04",
+      "title": "Proveedor en lista restrictiva",
+      "category": "Proveedor en lista restrictiva",
+      "description": "El proveedor Taller Observado esta marcado como restringido.",
+      "points": 35,
+      "severity": "critico",
+      "recommendation": "Escalar a revision especializada antifraude"
+    }
+  ]
+}
+```
 
 ## Endpoints de Dashboard
 
-### `GET /api/top-risk`
+### `GET /api/risk/top`
 
 Devuelve los casos con mayor riesgo usando un payload mínimo para la bandeja:
 
@@ -390,13 +419,6 @@ Devuelve los casos con mayor riesgo usando un payload mínimo para la bandeja:
     "monto_reclamado": "24000.00"
   }
 ]
-```
-
-Alias disponibles:
-
-```text
-GET /api/risk/top
-GET /api/risk/top-risk
 ```
 
 ### `GET /api/analytics/summary`
@@ -564,7 +586,7 @@ Decisiones importantes para la integración:
 
 - Mostrar `code` en la interfaz, no UUID.
 - Navegar al detalle con `GET /api/claims/{code}`.
-- Usar `/api/top-risk` para la bandeja de casos priorizados.
+- Usar `/api/risk/top` para la bandeja de casos priorizados.
 - Usar `/api/analytics/summary` para KPIs generales.
 - Usar `/api/analytics/providers` para ranking y resumen de proveedores.
 - Usar `/api/analytics/alerts` para ranking y resumen de reglas.
