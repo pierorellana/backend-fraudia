@@ -65,6 +65,7 @@ DATASET_REQUIRED_COLUMNS = {
 DATASET_COLUMN_ALIASES = {
     "insureds": {
         "id_asegurado": {"id_asegurado", "id"},
+        "code": {"code", "codigo", "codigo_asegurado"},
         "segmento": {"segmento", "segment"},
         "antiguedad_meses": {"antiguedad_meses", "seniority_months"},
         "ciudad": {"ciudad", "city"},
@@ -75,6 +76,7 @@ DATASET_COLUMN_ALIASES = {
     },
     "providers": {
         "id_proveedor": {"id_proveedor", "id"},
+        "code": {"code", "codigo", "codigo_proveedor"},
         "nombre": {"nombre", "name"},
         "tipo": {"tipo", "provider_type"},
         "ciudad": {"ciudad", "city"},
@@ -86,6 +88,7 @@ DATASET_COLUMN_ALIASES = {
     },
     "policies": {
         "id_poliza": {"id_poliza", "id"},
+        "code": {"code", "codigo", "codigo_poliza"},
         "id_asegurado": {"id_asegurado", "insured_id"},
         "ramo": {"ramo", "branch"},
         "fecha_inicio": {"fecha_inicio", "start_date"},
@@ -110,6 +113,7 @@ DATASET_COLUMN_ALIASES = {
     },
     "claims": {
         "id_siniestro": {"id_siniestro", "id"},
+        "code": {"code", "codigo", "codigo_siniestro"},
         "id_poliza": {"id_poliza", "policy_id"},
         "id_asegurado": {"id_asegurado", "insured_id"},
         "id_proveedor": {"id_proveedor", "provider_id"},
@@ -209,6 +213,43 @@ DATASET_REQUIRED_COLUMN_GROUPS = {
         for canonical in required_columns
     }
     for dataset, required_columns in DATASET_REQUIRED_COLUMNS.items()
+}
+
+BRANCH_NORMALIZATION = {
+    "vida": "Vida",
+    "salud": "Salud",
+    "vehiculo": "Vehiculos",
+    "vehiculos": "Vehiculos",
+    "hogar": "Hogar",
+    "general": "Generales",
+    "generales": "Generales",
+}
+
+CLAIM_STATUS_NORMALIZATION = {
+    "abierto": "Abierto",
+    "analisis": "En analisis",
+    "en_analisis": "En analisis",
+    "revision": "En revision",
+    "en_revision": "En revision",
+    "observado": "Observado",
+    "pendiente": "Pendiente",
+    "reserva": "Reserva",
+    "cerrado": "Cerrado",
+    "finalizado": "Finalizado",
+    "pagado": "Pagado",
+    "rechazado": "Rechazado",
+    "anulado": "Anulado",
+    "cancelado": "Cancelado",
+}
+
+POLICY_STATUS_NORMALIZATION = {
+    "activa": "Vigente",
+    "activo": "Vigente",
+    "vigente": "Vigente",
+    "cancelada": "Cancelada",
+    "cancelado": "Cancelada",
+    "vencida": "Vencida",
+    "vencido": "Vencida",
 }
 
 
@@ -461,6 +502,7 @@ class FileImportService:
     def _map_insured(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": self._uuid_value(row, "id_asegurado", "id"),
+            "code": self._value(row, "code", "codigo", "codigo_asegurado"),
             "segment": self._value(row, "segmento", "segment"),
             "seniority_months": self._int_value(row, "antiguedad_meses", "seniority_months"),
             "city": self._value(row, "ciudad", "city"),
@@ -473,8 +515,10 @@ class FileImportService:
     def _map_policy(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": self._uuid_value(row, "id_poliza", "id"),
+            "code": self._value(row, "code", "codigo", "codigo_poliza"),
             "insured_id": self._required(row, "id_asegurado", "insured_id"),
-            "branch": self._required(row, "ramo", "branch"),
+            "branch": self._normalized_option(row, BRANCH_NORMALIZATION, "ramo", "branch")
+            or self._required(row, "ramo", "branch"),
             "start_date": self._date_value(row, "fecha_inicio", "start_date", required=True),
             "end_date": self._date_value(row, "fecha_fin", "end_date", required=True),
             "premium_amount": self._decimal_value(row, "prima", "premium_amount"),
@@ -482,12 +526,13 @@ class FileImportService:
             "deductible": self._decimal_value(row, "deducible", "deductible"),
             "sales_channel": self._value(row, "canal_venta", "sales_channel"),
             "city": self._value(row, "ciudad", "city"),
-            "status": self._value(row, "estado_poliza", "status"),
+            "status": self._normalized_option(row, POLICY_STATUS_NORMALIZATION, "estado_poliza", "status"),
         }
 
     def _map_provider(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": self._uuid_value(row, "id_proveedor", "id"),
+            "code": self._value(row, "code", "codigo", "codigo_proveedor"),
             "name": self._value(row, "nombre", "name"),
             "provider_type": self._value(row, "tipo", "provider_type"),
             "city": self._value(row, "ciudad", "city"),
@@ -514,17 +559,18 @@ class FileImportService:
     def _map_claim(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": self._uuid_value(row, "id_siniestro", "id"),
+            "code": self._value(row, "code", "codigo", "codigo_siniestro"),
             "policy_id": self._required(row, "id_poliza", "policy_id"),
             "insured_id": self._required(row, "id_asegurado", "insured_id"),
             "provider_id": self._value(row, "id_proveedor", "provider_id"),
-            "branch": self._value(row, "ramo", "branch"),
+            "branch": self._normalized_option(row, BRANCH_NORMALIZATION, "ramo", "branch"),
             "coverage": self._value(row, "cobertura", "coverage"),
             "occurrence_date": self._date_value(row, "fecha_ocurrencia", "occurrence_date"),
             "reported_date": self._date_value(row, "fecha_reporte", "reported_date"),
             "claimed_amount": self._decimal_value(row, "monto_reclamado", "claimed_amount"),
             "estimated_amount": self._decimal_value(row, "monto_estimado", "estimated_amount"),
             "paid_amount": self._decimal_value(row, "monto_pagado", "paid_amount"),
-            "status": self._value(row, "estado", "status"),
+            "status": self._normalized_option(row, CLAIM_STATUS_NORMALIZATION, "estado", "status"),
             "office": self._value(row, "sucursal", "office"),
             "description": self._value(row, "descripcion", "description"),
             "documents_complete": self._bool_value(row, "documentos_completos", "documents_complete", default=False),
@@ -669,6 +715,13 @@ class FileImportService:
             if normalized in row and row[normalized] is not None:
                 return row[normalized]
         return None
+
+    def _normalized_option(self, row: dict[str, Any], mapping: dict[str, str], *keys: str) -> str | None:
+        value = self._value(row, *keys)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return mapping.get(self._normalize_header(text), text)
 
     def _required(self, row: dict[str, Any], *keys: str) -> Any:
         value = self._value(row, *keys)

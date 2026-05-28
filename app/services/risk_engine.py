@@ -29,6 +29,8 @@ class RiskContext:
     driver_claim_count: int
     provider_claim_count: int
     average_claimed_amount: Decimal | None
+    peer_claim_count: int
+    amount_z_score: float | None
     similar_claim_id: str | None
     narrative_similarity: float
 
@@ -126,6 +128,7 @@ class RiskEngine:
         alerts.extend(self._document_alerts(claim.documents))
         alerts.extend(self._narrative_alerts(context))
         alerts.extend(self._amount_alerts(claim, policy, context))
+        alerts.extend(self._anomaly_alerts(context))
         alerts.extend(self._dynamic_alerts(claim.description or ""))
 
         score = min(sum(alert.points for alert in alerts), 100)
@@ -155,6 +158,30 @@ class RiskEngine:
         days_to_end = claim.days_from_policy_end
         if days_to_end is None and policy.end_date:
             days_to_end = (policy.end_date - claim.occurrence_date).days
+
+        if days_from_start is not None and days_from_start < 0:
+            alerts.append(
+                RuleAlert(
+                    code="RF-01",
+                    title="Siniestro antes del inicio de vigencia",
+                    description=f"Ocurrio {abs(days_from_start)} dias antes del inicio de la poliza.",
+                    points=30,
+                    severity=AlertSeverity.CRITICAL,
+                )
+            )
+            return alerts
+
+        if days_to_end is not None and days_to_end < 0:
+            alerts.append(
+                RuleAlert(
+                    code="RF-01",
+                    title="Siniestro posterior al fin de vigencia",
+                    description=f"Ocurrio {abs(days_to_end)} dias despues del fin de la poliza.",
+                    points=30,
+                    severity=AlertSeverity.CRITICAL,
+                )
+            )
+            return alerts
 
         if days_from_start is not None and 0 <= days_from_start <= 7:
             alerts.append(
@@ -199,6 +226,52 @@ class RiskEngine:
             )
 
         return alerts
+
+    def _anomaly_alerts(self, context: RiskContext) -> list[RuleAlert]:
+        if context.amount_z_score is None or context.peer_claim_count < 5:
+            return []
+
+        if context.amount_z_score >= 3.5:
+            return [
+                RuleAlert(
+                    code="RF-09",
+                    title="Anomalia estadistica critica en monto",
+                    description=(
+                        "El monto reclamado esta muy por encima del comportamiento historico "
+                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
+                    ),
+                    points=24,
+                    severity=AlertSeverity.CRITICAL,
+                )
+            ]
+        if context.amount_z_score >= 2.5:
+            return [
+                RuleAlert(
+                    code="RF-09",
+                    title="Anomalia estadistica en monto",
+                    description=(
+                        "El monto reclamado se aleja significativamente del comportamiento historico "
+                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
+                    ),
+                    points=16,
+                    severity=AlertSeverity.HIGH,
+                )
+            ]
+        if context.amount_z_score >= 2.0:
+            return [
+                RuleAlert(
+                    code="RF-09",
+                    title="Monto inusual por modelo estadistico",
+                    description=(
+                        "El monto reclamado supera el umbral de anomalia moderada "
+                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
+                    ),
+                    points=10,
+                    severity=AlertSeverity.MEDIUM,
+                )
+            ]
+
+        return []
 
     def _report_delay_alerts(self, claim: Claim) -> list[RuleAlert]:
         if not claim.occurrence_date or not claim.reported_date:

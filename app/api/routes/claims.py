@@ -9,7 +9,6 @@ from app.models.enums import RiskLevel
 from app.repositories.claims import ClaimRepository
 from app.schemas.claims import ClaimDetailRead
 from app.schemas.claims import ClaimListResponse
-from app.schemas.claims import ClaimRead
 from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
 from app.schemas.risk import RiskAssessmentRead
@@ -34,7 +33,7 @@ def list_claims(
 
 @router.get("/{claim_id}", response_model=GeneralResponse[ClaimDetailRead])
 def get_claim(claim_id: str, db: Session = Depends(get_db)) -> GeneralResponse[ClaimDetailRead]:
-    claim = claims.get_by_id(db, claim_id)
+    claim = claims.get_by_identifier(db, claim_id)
     if not claim:
         raise HTTPException(status_code=404, detail=f"Claim {claim_id} not found")
     return success_response(claim)

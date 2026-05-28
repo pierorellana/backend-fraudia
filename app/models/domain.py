@@ -30,6 +30,7 @@ class Insured(Base):
     __tablename__ = "asegurados"
 
     id: Mapped[str] = mapped_column("id_asegurado", UUIDString, primary_key=True)
+    code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
     segment: Mapped[str | None] = mapped_column("segmento", String(50), nullable=True)
     seniority_months: Mapped[int | None] = mapped_column("antiguedad_meses", Integer, nullable=True)
     city: Mapped[str | None] = mapped_column("ciudad", String(100), nullable=True)
@@ -47,6 +48,7 @@ class Policy(Base):
     __tablename__ = "polizas"
 
     id: Mapped[str] = mapped_column("id_poliza", UUIDString, primary_key=True)
+    code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
     insured_id: Mapped[str] = mapped_column("id_asegurado", ForeignKey("asegurados.id_asegurado"), index=True)
     branch: Mapped[str] = mapped_column("ramo", String(50), index=True)
     start_date: Mapped[date] = mapped_column("fecha_inicio", Date, nullable=False)
@@ -68,6 +70,7 @@ class Provider(Base):
     __tablename__ = "proveedores"
 
     id: Mapped[str] = mapped_column("id_proveedor", UUIDString, primary_key=True)
+    code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
     name: Mapped[str | None] = mapped_column("nombre", String(150), nullable=True, index=True)
     provider_type: Mapped[str | None] = mapped_column("tipo", String(50), nullable=True)
     city: Mapped[str | None] = mapped_column("ciudad", String(100), nullable=True)
@@ -102,6 +105,7 @@ class Claim(Base):
     __tablename__ = "siniestros"
 
     id: Mapped[str] = mapped_column("id_siniestro", UUIDString, primary_key=True)
+    code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
     policy_id: Mapped[str] = mapped_column("id_poliza", ForeignKey("polizas.id_poliza"), index=True)
     insured_id: Mapped[str] = mapped_column("id_asegurado", ForeignKey("asegurados.id_asegurado"), index=True)
     provider_id: Mapped[str | None] = mapped_column(

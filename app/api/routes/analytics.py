@@ -4,9 +4,9 @@ from fastapi import Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.analytics import AlertRankingItem
+from app.schemas.analytics import AlertDashboardSummary
 from app.schemas.analytics import DashboardSummary
-from app.schemas.analytics import ProviderRiskSummary
+from app.schemas.analytics import ProviderDashboardSummary
 from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
 from app.services.analytics_service import AnalyticsService
@@ -20,17 +20,17 @@ def dashboard_summary(db: Session = Depends(get_db)) -> GeneralResponse[Dashboar
     return success_response(analytics.dashboard_summary(db))
 
 
-@router.get("/providers", response_model=GeneralResponse[list[ProviderRiskSummary]])
+@router.get("/providers", response_model=GeneralResponse[ProviderDashboardSummary])
 def provider_ranking(
     db: Session = Depends(get_db),
     limit: int = Query(default=10, ge=1, le=50),
-) -> GeneralResponse[list[ProviderRiskSummary]]:
-    return success_response(analytics.provider_ranking(db, limit=limit))
+) -> GeneralResponse[ProviderDashboardSummary]:
+    return success_response(analytics.provider_dashboard(db, limit=limit))
 
 
-@router.get("/alerts", response_model=GeneralResponse[list[AlertRankingItem]])
+@router.get("/alerts", response_model=GeneralResponse[AlertDashboardSummary])
 def alert_ranking(
     db: Session = Depends(get_db),
     limit: int = Query(default=10, ge=1, le=50),
-) -> GeneralResponse[list[AlertRankingItem]]:
-    return success_response(analytics.alert_ranking(db, limit=limit))
+) -> GeneralResponse[AlertDashboardSummary]:
+    return success_response(analytics.alert_dashboard(db, limit=limit))

@@ -92,25 +92,27 @@ class AgentService:
         question: str,
     ) -> ChatSession | None:
         now = self._utc_now()
-        if claim_id and not db.get(Claim, claim_id):
+        claim = self.claims.get_by_identifier(db, claim_id) if claim_id else None
+        if claim_id and not claim:
             raise ValueError(f"No encontre el siniestro {claim_id}.")
+        resolved_claim_id = claim.id if claim else None
 
         if session_id:
             session = db.get(ChatSession, session_id)
             if not session:
                 raise ValueError(f"Sesion de chat no encontrada: {session_id}.")
-            if claim_id and session.claim_id and session.claim_id != claim_id:
+            if resolved_claim_id and session.claim_id and session.claim_id != resolved_claim_id:
                 raise ValueError(
                     f"La sesion {session_id} pertenece al siniestro {session.claim_id}, no a {claim_id}."
                 )
-            if claim_id and not session.claim_id:
-                session.claim_id = claim_id
+            if resolved_claim_id and not session.claim_id:
+                session.claim_id = resolved_claim_id
             session.updated_at = now
             db.flush()
             return session
 
-        if claim_id:
-            session = self._find_session_for_claim(db, claim_id)
+        if resolved_claim_id:
+            session = self._find_session_for_claim(db, resolved_claim_id)
             if session:
                 session.updated_at = now
                 db.flush()
@@ -123,7 +125,7 @@ class AgentService:
                 title=question[:160],
                 created_at=now,
                 updated_at=now,
-                active_filters={"id_siniestro": claim_id},
+                active_filters={"id_siniestro": resolved_claim_id},
                 active=True,
             )
             db.add(session)
@@ -249,7 +251,7 @@ class AgentService:
         for claim in top_claims:
             assessment = claim.risk_assessment
             if assessment:
-                lines.append(f"- {claim.id}: score {assessment.score}, nivel {assessment.level}.")
+                lines.append(f"- {self._claim_label(claim)}: score {assessment.score}, nivel {assessment.level}.")
 
         providers = self.analytics.provider_ranking(db, limit=5)
         lines.append("Proveedores con mayor riesgo promedio:")
@@ -306,14 +308,14 @@ class AgentService:
             if not assessment:
                 continue
             rows.append(
-                f"{index}. {claim.id}: score {assessment.score}, nivel {assessment.level}, "
+                f"{index}. {self._claim_label(claim)}: score {assessment.score}, nivel {assessment.level}, "
                 f"accion: {assessment.suggested_action}."
             )
         return "Casos recomendados para revisar primero:\n" + "\n".join(rows)
 
     def _claim_lines(self, claim: Claim) -> list[str]:
         lines = [
-            f"Siniestro {claim.id}",
+            f"Siniestro {self._claim_label(claim)}",
             f"Ramo/cobertura: {claim.branch} / {claim.coverage}",
             f"Monto reclamado: {claim.claimed_amount}",
             f"Descripcion: {claim.description or 'Sin descripcion'}",
@@ -330,7 +332,7 @@ class AgentService:
 
     def _explain_claim(self, claim: Claim) -> str:
         if not claim.risk_assessment:
-            return f"El siniestro {claim.id} aun no tiene evaluacion de riesgo."
+            return f"El siniestro {self._claim_label(claim)} aun no tiene evaluacion de riesgo."
 
         assessment = claim.risk_assessment
         alerts = sorted(assessment.alerts, key=lambda alert: alert.points, reverse=True)
@@ -338,7 +340,7 @@ class AgentService:
             f"- {alert.title}: {alert.description} (+{alert.points})" for alert in alerts[:5]
         )
         return (
-            f"El siniestro {claim.id} tiene score {assessment.score}/100 y nivel "
+            f"El siniestro {self._claim_label(claim)} tiene score {assessment.score}/100 y nivel "
             f"{assessment.level}. Accion sugerida: {assessment.suggested_action}.\n"
             f"Motivos principales:\n{alert_text or '- Sin alertas relevantes.'}\n"
             "Esto no es una acusacion; es una priorizacion para revision humana."
@@ -346,7 +348,7 @@ class AgentService:
 
     def _document_answer(self, db: Session) -> str:
         rows = db.execute(
-            select(Claim.id, ClaimDocument)
+            select(Claim, ClaimDocument)
             .join(ClaimDocument, ClaimDocument.claim_id == Claim.id)
             .where(
                 (ClaimDocument.delivered.is_(False))
@@ -359,8 +361,8 @@ class AgentService:
         if not rows:
             return "No encontre documentos faltantes, ilegibles o inconsistentes."
         items = [
-            f"- {claim_id}: {document.document_type or document.id} ({document.status})"
-            for claim_id, document in rows
+            f"- {claim.code or claim.id}: {document.document_type or document.id} ({document.status})"
+            for claim, document in rows
         ]
         return "Documentos con novedades:\n" + "\n".join(items)
 
@@ -377,8 +379,11 @@ class AgentService:
         if not rows:
             return f"No encontre casos para: {title}."
         items = [
-            f"- {claim.id}: score {claim.risk_assessment.score}, monto {claim.claimed_amount}"
+            f"- {self._claim_label(claim)}: score {claim.risk_assessment.score}, monto {claim.claimed_amount}"
             for claim in rows
             if claim.risk_assessment
         ]
         return f"{title}:\n" + "\n".join(items)
+
+    def _claim_label(self, claim: Claim) -> str:
+        return claim.code or claim.id

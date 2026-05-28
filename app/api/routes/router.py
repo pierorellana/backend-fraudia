@@ -9,6 +9,7 @@ from app.api.routes import risk
 api_router = APIRouter()
 api_router.include_router(claims.router, prefix="/claims", tags=["claims"])
 api_router.include_router(risk.router, prefix="/risk", tags=["risk"])
+api_router.include_router(risk.top_risk_router, tags=["risk"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(imports.router, prefix="/imports", tags=["imports"])
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"])

@@ -5,12 +5,14 @@ from decimal import Decimal
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 from app.schemas.risk import RiskAssessmentRead
 
 
 class InsuredBase(BaseModel):
     id: str
+    code: str | None = Field(default=None, max_length=20)
     segment: str | None = None
     seniority_months: int | None = None
     city: str | None = None
@@ -28,6 +30,7 @@ class InsuredRead(InsuredBase):
 
 class PolicyBase(BaseModel):
     id: str
+    code: str | None = Field(default=None, max_length=20)
     insured_id: str
     branch: str
     start_date: date
@@ -39,6 +42,12 @@ class PolicyBase(BaseModel):
     city: str | None = None
     status: str | None = None
 
+    @model_validator(mode="after")
+    def validate_policy_dates(self) -> "PolicyBase":
+        if self.start_date > self.end_date:
+            raise ValueError("fecha_inicio no puede ser posterior a fecha_fin")
+        return self
+
 
 class PolicyRead(PolicyBase):
     created_at: datetime | None = None
@@ -48,6 +57,7 @@ class PolicyRead(PolicyBase):
 
 class ProviderBase(BaseModel):
     id: str
+    code: str | None = Field(default=None, max_length=20)
     name: str | None = None
     provider_type: str | None = None
     city: str | None = None
@@ -102,6 +112,7 @@ class ClaimDocumentRead(ClaimDocumentCreate):
 
 class ClaimCreate(BaseModel):
     id: str
+    code: str | None = Field(default=None, max_length=20)
     policy_id: str
     insured_id: str
     provider_id: str | None = None
@@ -122,9 +133,16 @@ class ClaimCreate(BaseModel):
     insured_claim_history: int = 0
     documents: list[ClaimDocumentCreate] = []
 
+    @model_validator(mode="after")
+    def validate_claim_dates(self) -> "ClaimCreate":
+        if self.occurrence_date and self.reported_date and self.reported_date < self.occurrence_date:
+            raise ValueError("fecha_reporte no puede ser anterior a fecha_ocurrencia")
+        return self
+
 
 class ClaimRead(BaseModel):
     id: str
+    code: str | None = None
     policy_id: str
     insured_id: str
     provider_id: str | None = None
@@ -157,8 +175,28 @@ class ClaimDetailRead(ClaimRead):
     provider: ProviderRead | None = None
 
 
+class ClaimListItem(BaseModel):
+    code: str | None = None
+    ramo: str | None = None
+    cobertura: str | None = None
+    estado: str | None = None
+    fecha_ocurrencia: date | None = None
+    monto_reclamado: Decimal | None = None
+    score: Decimal | None = None
+    nivel_riesgo: str | None = None
+
+
 class ClaimListResponse(BaseModel):
-    items: list[ClaimRead]
+    items: list[ClaimListItem]
     total: int
     limit: int
     offset: int
+
+
+class TopRiskClaimRead(BaseModel):
+    code: str | None = None
+    ramo: str | None = None
+    score: Decimal | None = None
+    nivel_riesgo: str | None = None
+    fecha_ocurrencia: date | None = None
+    monto_reclamado: Decimal | None = None

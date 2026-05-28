@@ -38,9 +38,9 @@ class ImportService:
         if reset:
             self._clear_data(db)
 
-        self._bulk_upsert(db, Insured, [insured.model_dump() for insured in payload.insureds])
-        self._bulk_upsert(db, Provider, [provider.model_dump() for provider in payload.providers])
-        self._bulk_upsert(db, Policy, [policy.model_dump() for policy in payload.policies])
+        self._bulk_upsert(db, Insured, [insured.model_dump() for insured in payload.insureds], code_prefix="ASE")
+        self._bulk_upsert(db, Provider, [provider.model_dump() for provider in payload.providers], code_prefix="PRO")
+        self._bulk_upsert(db, Policy, [policy.model_dump() for policy in payload.policies], code_prefix="POL")
         self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles])
 
         policies_by_id = {policy.id: policy for policy in payload.policies}
@@ -84,7 +84,7 @@ class ImportService:
         claim_ids = [claim["id"] for claim in claim_mappings]
         if claim_ids:
             db.execute(delete(ClaimDocument).where(ClaimDocument.claim_id.in_(claim_ids)))
-        self._bulk_upsert(db, Claim, claim_mappings)
+        self._bulk_upsert(db, Claim, claim_mappings, code_prefix="SIN")
         if document_mappings:
             db.bulk_insert_mappings(ClaimDocument, document_mappings)
 
@@ -123,12 +123,22 @@ class ImportService:
         db.execute(delete(Insured))
         db.flush()
 
-    def _bulk_upsert(self, db: Session, model: type, mappings: list[dict[str, Any]]) -> None:
+    def _bulk_upsert(
+        self,
+        db: Session,
+        model: type,
+        mappings: list[dict[str, Any]],
+        *,
+        code_prefix: str | None = None,
+    ) -> None:
         if not mappings:
             return
 
         deduplicated = {mapping["id"]: mapping for mapping in mappings}
         records = list(deduplicated.values())
+        if code_prefix is not None:
+            self._ensure_codes(db, model, records, code_prefix)
+
         record_ids = list(deduplicated)
         existing_ids = set(db.scalars(select(model.id).where(model.id.in_(record_ids))).all())
         inserts = [record for record in records if record["id"] not in existing_ids]
@@ -138,3 +148,61 @@ class ImportService:
             db.bulk_insert_mappings(model, inserts)
         if updates:
             db.bulk_update_mappings(model, updates)
+
+    def _ensure_codes(self, db: Session, model: type, records: list[dict[str, Any]], prefix: str) -> None:
+        record_ids = [record["id"] for record in records]
+        existing_rows = db.execute(select(model.id, model.code).where(model.id.in_(record_ids))).all()
+        codes_by_id = {
+            row.id: self._clean_code(row.code)
+            for row in existing_rows
+            if self._clean_code(row.code)
+        }
+        existing_code_owners = {
+            clean_code: row.id
+            for row in db.execute(select(model.id, model.code).where(model.code.is_not(None))).all()
+            if (clean_code := self._clean_code(row.code))
+        }
+        used_codes = set(existing_code_owners)
+        batch_codes: set[str] = set()
+        batch_code_owners: dict[str, str] = {}
+        next_number = 1
+
+        for record in records:
+            code = self._clean_code(record.get("code"))
+            if code:
+                existing_owner = existing_code_owners.get(code)
+                if existing_owner and existing_owner != record["id"]:
+                    raise ValueError(
+                        f"Codigo duplicado en {model.__tablename__}: {code} ya pertenece a {existing_owner}."
+                    )
+                batch_owner = batch_code_owners.get(code)
+                if batch_owner and batch_owner != record["id"]:
+                    raise ValueError(
+                        f"Codigo duplicado en la carga de {model.__tablename__}: {code}."
+                    )
+                record["code"] = code
+                batch_codes.add(code)
+                batch_code_owners[code] = record["id"]
+                continue
+
+            existing_code = codes_by_id.get(record["id"])
+            if existing_code:
+                record["code"] = existing_code
+                batch_codes.add(existing_code)
+                batch_code_owners[existing_code] = record["id"]
+                continue
+
+            while True:
+                candidate = f"{prefix}-{next_number:04d}"
+                next_number += 1
+                if candidate not in used_codes and candidate not in batch_codes:
+                    record["code"] = candidate
+                    used_codes.add(candidate)
+                    batch_codes.add(candidate)
+                    break
+
+    def _clean_code(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        code = str(value).strip().upper()
+        return code or None

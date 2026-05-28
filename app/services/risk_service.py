@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from decimal import Decimal
+import math
 from uuid import uuid4
 
 from sqlalchemy import delete
@@ -61,7 +62,7 @@ class RiskService:
             claim_id=claim.id,
             score=evaluation.score,
             level=evaluation.level.value,
-            model_version="rules-1.0",
+            model_version="rules-anomaly-1.0",
             signal_detail={alert.code: alert.points for alert in evaluation.alerts},
             explanation=evaluation.explanation,
             alerts=[
@@ -131,7 +132,7 @@ class RiskService:
                 claim_id=claim.id,
                 score=evaluation.score,
                 level=evaluation.level.value,
-                model_version="rules-1.0",
+                model_version="rules-anomaly-1.0",
                 signal_detail={alert.code: alert.points for alert in evaluation.alerts},
                 explanation=evaluation.explanation,
                 alerts=[
@@ -156,7 +157,7 @@ class RiskService:
     def _get_claim_for_assessment(self, db: Session, claim_id: str) -> Claim:
         claim = db.scalars(
             select(Claim)
-            .where(Claim.id == claim_id)
+            .where(or_(Claim.id == claim_id, Claim.code == claim_id))
             .options(
                 selectinload(Claim.policy).selectinload(Policy.vehicles),
                 selectinload(Claim.provider),
@@ -204,9 +205,11 @@ class RiskService:
                 Claim.claimed_amount.is_not(None),
             )
         ).all()
+        peer_amount_values = [Decimal(value) for value in amount_values]
         average_claimed_amount = None
-        if amount_values:
-            average_claimed_amount = sum(Decimal(value) for value in amount_values) / len(amount_values)
+        if peer_amount_values:
+            average_claimed_amount = sum(peer_amount_values) / len(peer_amount_values)
+        amount_z_score = self._amount_z_score(claim.claimed_amount, peer_amount_values)
 
         similar_claim_id, narrative_similarity = self._find_similar_claim(db, claim, use_embeddings=use_embeddings)
 
@@ -216,6 +219,8 @@ class RiskService:
             driver_claim_count=driver_claim_count,
             provider_claim_count=provider_claim_count,
             average_claimed_amount=average_claimed_amount,
+            peer_claim_count=len(peer_amount_values),
+            amount_z_score=amount_z_score,
             similar_claim_id=similar_claim_id,
             narrative_similarity=narrative_similarity,
         )
@@ -244,6 +249,7 @@ class RiskService:
         contexts: dict[str, RiskContext] = {}
         for claim in claims:
             average_claimed_amount = self._average_claimed_amount_for_claim(claim, amount_stats)
+            peer_amount_values = self._peer_amount_values_for_claim(claim, amount_stats)
             similar_claim_id, narrative_similarity = similar_claims.get(claim.id, (None, 0.0))
             contexts[claim.id] = RiskContext(
                 insured_claim_count=insured_counts.get(claim.insured_id, 0),
@@ -251,6 +257,8 @@ class RiskService:
                 driver_claim_count=0,
                 provider_claim_count=provider_counts.get(claim.provider_id, 0) if claim.provider_id else 0,
                 average_claimed_amount=average_claimed_amount,
+                peer_claim_count=len(peer_amount_values),
+                amount_z_score=self._amount_z_score(claim.claimed_amount, peer_amount_values),
                 similar_claim_id=similar_claim_id,
                 narrative_similarity=narrative_similarity,
             )
@@ -285,7 +293,7 @@ class RiskService:
         self,
         db: Session,
         claims: list[Claim],
-    ) -> dict[tuple[str | None, str | None], tuple[int, Decimal]]:
+    ) -> dict[tuple[str | None, str | None], list[Decimal]]:
         pairs = {(claim.branch, claim.coverage) for claim in claims}
         if not pairs:
             return {}
@@ -301,31 +309,48 @@ class RiskService:
             )
         ).all()
 
-        stats: dict[tuple[str | None, str | None], tuple[int, Decimal]] = {}
+        stats: dict[tuple[str | None, str | None], list[Decimal]] = {}
         for branch, coverage, amount in rows:
             pair = (branch, coverage)
             if pair not in pairs:
                 continue
-            count, total = stats.get(pair, (0, Decimal("0")))
-            stats[pair] = count + 1, total + Decimal(amount)
+            stats.setdefault(pair, []).append(Decimal(amount))
         return stats
 
     def _average_claimed_amount_for_claim(
         self,
         claim: Claim,
-        amount_stats: dict[tuple[str | None, str | None], tuple[int, Decimal]],
+        amount_stats: dict[tuple[str | None, str | None], list[Decimal]],
     ) -> Decimal | None:
-        stats = amount_stats.get((claim.branch, claim.coverage))
-        if not stats:
+        peer_amount_values = self._peer_amount_values_for_claim(claim, amount_stats)
+        if not peer_amount_values:
+            return None
+        return sum(peer_amount_values) / len(peer_amount_values)
+
+    def _peer_amount_values_for_claim(
+        self,
+        claim: Claim,
+        amount_stats: dict[tuple[str | None, str | None], list[Decimal]],
+    ) -> list[Decimal]:
+        values = list(amount_stats.get((claim.branch, claim.coverage), []))
+        if claim.claimed_amount is not None:
+            try:
+                values.remove(Decimal(claim.claimed_amount))
+            except ValueError:
+                pass
+        return values
+
+    def _amount_z_score(self, claimed_amount: Decimal | None, peer_amount_values: list[Decimal]) -> float | None:
+        if claimed_amount is None or len(peer_amount_values) < 5:
             return None
 
-        count, total = stats
-        if claim.claimed_amount is not None:
-            count -= 1
-            total -= Decimal(claim.claimed_amount)
-        if count <= 0:
+        values = [float(value) for value in peer_amount_values]
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        standard_deviation = math.sqrt(variance)
+        if standard_deviation == 0:
             return None
-        return total / count
+        return (float(claimed_amount) - mean) / standard_deviation
 
     def _similar_claims_for_claims(
         self,

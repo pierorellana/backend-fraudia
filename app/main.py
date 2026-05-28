@@ -11,6 +11,7 @@ from app.core.exception_handlers import http_exception_handler
 from app.core.exception_handlers import unhandled_exception_handler
 from app.core.exception_handlers import validation_exception_handler
 from app.db.base import Base
+from app.db.schema import ensure_code_columns
 from app.db.session import engine
 from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
@@ -21,6 +22,7 @@ from app import models  # noqa: F401
 async def lifespan(app: FastAPI):
     if settings.auto_create_tables:
         Base.metadata.create_all(bind=engine)
+    ensure_code_columns(engine)
     yield
 
 
