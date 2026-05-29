@@ -9,9 +9,18 @@ from app.core.config import settings
 
 class OllamaClient:
     def chat(self, *, question: str, context: str) -> str | None:
+        options = {
+            "temperature": settings.agent_ollama_temperature,
+            "num_predict": settings.agent_ollama_num_predict,
+            "num_ctx": settings.agent_ollama_num_ctx,
+        }
+        if settings.agent_ollama_num_thread:
+            options["num_thread"] = settings.agent_ollama_num_thread
+
         payload = {
             "model": settings.ollama_model,
             "stream": False,
+            "options": options,
             "messages": [
                 {
                     "role": "system",
@@ -32,13 +41,17 @@ class OllamaClient:
             ],
         }
         try:
-            with httpx.Client(base_url=settings.ollama_base_url, timeout=settings.ollama_timeout_seconds) as client:
+            with httpx.Client(base_url=settings.ollama_base_url, timeout=settings.agent_ollama_timeout_seconds) as client:
                 response = client.post("/api/chat", json=payload)
                 response.raise_for_status()
         except httpx.HTTPError:
             return None
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+
         message = data.get("message") or {}
         content = message.get("content")
         return content if isinstance(content, str) and content.strip() else None

@@ -87,6 +87,14 @@ OLLAMA_MODEL=qwen3:4b
 OLLAMA_EMBEDDINGS_ENABLED=false
 OLLAMA_EMBEDDING_MODEL=bge-m3
 OLLAMA_TIMEOUT_SECONDS=120
+
+AGENT_LLM_DEFAULT_ENABLED=false
+AGENT_HISTORY_LIMIT=4
+AGENT_OLLAMA_TIMEOUT_SECONDS=12
+AGENT_OLLAMA_NUM_PREDICT=220
+AGENT_OLLAMA_NUM_CTX=2048
+AGENT_OLLAMA_TEMPERATURE=0.2
+# AGENT_OLLAMA_NUM_THREAD=2
 ```
 
 Para trabajar contra PostgreSQL, se recomienda dejar `AUTO_CREATE_TABLES=false` si la base ya fue creada previamente. En pruebas automatizadas se utiliza SQLite y la creación de tablas se activa desde la configuración de test.
@@ -539,10 +547,24 @@ Para continuar una conversación:
 }
 ```
 
+Si el frontend envía `user_id`, ese UUID debe existir en la tabla `usuarios`. Si el usuario del frontend no está sincronizado con esa tabla, conviene omitir `user_id` y dejar que el backend use el usuario por defecto configurado o el primer usuario disponible.
+
 El agente tiene dos modos:
 
 - Modo determinístico: usa los datos y reglas del backend.
-- Modo Ollama: construye contexto controlado y consulta el modelo configurado. Si Ollama no responde, el sistema puede volver al modo determinístico.
+- Modo Ollama: construye contexto controlado y consulta el modelo configurado. Si Ollama no responde dentro del timeout, el sistema vuelve al modo determinístico.
+
+Por rendimiento, el modo predeterminado es determinístico aunque `OLLAMA_ENABLED=true`. Para pedir LLM desde el frontend, enviar `use_llm: true`:
+
+```json
+{
+  "question": "Dame una explicación ejecutiva",
+  "claim_id": "SIN-1042",
+  "use_llm": true
+}
+```
+
+Si se quiere volver al comportamiento anterior, donde el agente intenta Ollama cuando el frontend no envía `use_llm`, configurar `AGENT_LLM_DEFAULT_ENABLED=true`.
 
 Consultas soportadas:
 

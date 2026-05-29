@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = "bge-m3"
     ollama_timeout_seconds: float = 45.0
 
+    agent_llm_default_enabled: bool = False
+    agent_history_limit: int = 4
+    agent_ollama_timeout_seconds: float = 12.0
+    agent_ollama_num_predict: int = 220
+    agent_ollama_num_ctx: int = 2048
+    agent_ollama_temperature: float = 0.2
+    agent_ollama_num_thread: int | None = None
+
     agent_default_user_id: str | None = None
 
     import_max_rows: int = 5000
