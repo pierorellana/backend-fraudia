@@ -31,6 +31,7 @@ class Insured(Base):
 
     id: Mapped[str] = mapped_column("id_asegurado", UUIDString, primary_key=True)
     code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
+    name: Mapped[str | None] = mapped_column("nombres_asegurado", String(180), nullable=True)
     segment: Mapped[str | None] = mapped_column("segmento", String(50), nullable=True)
     seniority_months: Mapped[int | None] = mapped_column("antiguedad_meses", Integer, nullable=True)
     city: Mapped[str | None] = mapped_column("ciudad", String(100), nullable=True)
@@ -38,7 +39,23 @@ class Insured(Base):
     claims_12m: Mapped[int] = mapped_column("reclamos_12m", Integer, default=0, nullable=False)
     current_delinquency: Mapped[bool] = mapped_column("mora_actual", Boolean, default=False, nullable=False)
     client_score: Mapped[Decimal | None] = mapped_column("score_cliente", Numeric(5, 2), nullable=True)
+    historical_claims_total: Mapped[int | None] = mapped_column(
+        "reclamos_historico_total",
+        Integer,
+        nullable=True,
+    )
+    rc_claims_without_third_party: Mapped[int | None] = mapped_column(
+        "reclamos_rc_sin_tercero",
+        Integer,
+        nullable=True,
+    )
+    historical_risk_profile: Mapped[str | None] = mapped_column(
+        "perfil_riesgo_historico",
+        String(50),
+        nullable=True,
+    )
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     policies: Mapped[list[Policy]] = relationship(back_populates="insured")
     claims: Mapped[list[Claim]] = relationship(back_populates="insured")
@@ -60,6 +77,7 @@ class Policy(Base):
     city: Mapped[str | None] = mapped_column("ciudad", String(100), nullable=True)
     status: Mapped[str | None] = mapped_column("estado_poliza", String(30), nullable=True, index=True)
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     insured: Mapped[Insured] = relationship(back_populates="policies")
     vehicles: Mapped[list[Vehicle]] = relationship(back_populates="policy", cascade="all, delete-orphan")
@@ -79,7 +97,9 @@ class Provider(Base):
     observed_cases_pct: Mapped[Decimal | None] = mapped_column("pct_casos_observados", Numeric(5, 2), nullable=True)
     seniority_months: Mapped[int | None] = mapped_column("antiguedad_meses", Integer, nullable=True)
     is_restricted: Mapped[bool] = mapped_column("en_lista_restrictiva", Boolean, default=False, nullable=False)
+    restriction_reason: Mapped[str | None] = mapped_column("motivo_restriccion", Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     claims: Mapped[list[Claim]] = relationship(back_populates="provider")
 
@@ -89,6 +109,13 @@ class Vehicle(Base):
 
     id: Mapped[str] = mapped_column("id_vehiculo", UUIDString, primary_key=True)
     policy_id: Mapped[str] = mapped_column("id_poliza", ForeignKey("polizas.id_poliza"), index=True)
+    insured_id: Mapped[str | None] = mapped_column(
+        "id_asegurado",
+        ForeignKey("asegurados.id_asegurado"),
+        nullable=True,
+        index=True,
+    )
+    code: Mapped[str | None] = mapped_column("code", String(20), nullable=True, unique=True, index=True)
     plate: Mapped[str | None] = mapped_column("placa", String(20), nullable=True, index=True)
     chassis: Mapped[str | None] = mapped_column("chasis", String(50), nullable=True)
     engine: Mapped[str | None] = mapped_column("motor", String(50), nullable=True)
@@ -97,6 +124,7 @@ class Vehicle(Base):
     year: Mapped[int | None] = mapped_column("anio", Integer, nullable=True)
     color: Mapped[str | None] = mapped_column("color", String(30), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     policy: Mapped[Policy] = relationship(back_populates="vehicles")
 
@@ -111,6 +139,12 @@ class Claim(Base):
     provider_id: Mapped[str | None] = mapped_column(
         "id_proveedor",
         ForeignKey("proveedores.id_proveedor"),
+        nullable=True,
+        index=True,
+    )
+    vehicle_id: Mapped[str | None] = mapped_column(
+        "id_vehiculo",
+        ForeignKey("vehiculos.id_vehiculo"),
         nullable=True,
         index=True,
     )
@@ -134,11 +168,35 @@ class Claim(Base):
         default=0,
         nullable=False,
     )
+    load_id: Mapped[str | None] = mapped_column("id_carga", UUIDString, nullable=True)
+    workflow_status: Mapped[str | None] = mapped_column("estado_flujo", String(50), nullable=True)
+    last_decision: Mapped[str | None] = mapped_column("ultima_decision", String(80), nullable=True)
+    last_review_at: Mapped[datetime | None] = mapped_column("ultima_revision_en", DateTime, nullable=True)
+    provider_restricted: Mapped[bool] = mapped_column(
+        "proveedor_lista_restrictiva",
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    narrative_similarity_max: Mapped[Decimal | None] = mapped_column(
+        "similitud_narrativa_max",
+        Numeric(5, 2),
+        nullable=True,
+    )
+    police_report_number: Mapped[str | None] = mapped_column("numero_parte_policial", String(80), nullable=True)
+    policy_insured_amount: Mapped[Decimal | None] = mapped_column("suma_asegurada", Numeric(12, 2), nullable=True)
+    amount_to_insured_ratio: Mapped[Decimal | None] = mapped_column(
+        "ratio_monto_suma_asegurada",
+        Numeric(8, 4),
+        nullable=True,
+    )
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     policy: Mapped[Policy] = relationship(back_populates="claims")
     insured: Mapped[Insured] = relationship(back_populates="claims")
     provider: Mapped[Provider | None] = relationship(back_populates="claims")
+    vehicle: Mapped[Vehicle | None] = relationship()
     documents: Mapped[list[ClaimDocument]] = relationship(
         back_populates="claim",
         cascade="all, delete-orphan",
@@ -151,6 +209,8 @@ class Claim(Base):
 
     @property
     def vehicle_plate(self) -> str | None:
+        if self.vehicle:
+            return self.vehicle.plate
         if self.policy and self.policy.vehicles:
             return self.policy.vehicles[0].plate
         return None
@@ -172,7 +232,9 @@ class ClaimDocument(Base):
         nullable=False,
     )
     notes: Mapped[str | None] = mapped_column("observacion", Text, nullable=True)
+    file_name_pdf: Mapped[str | None] = mapped_column("nombre_archivo_pdf", String(255), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column("creado_en", DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("actualizado_en", DateTime, nullable=True)
 
     claim: Mapped[Claim] = relationship(back_populates="documents")
 

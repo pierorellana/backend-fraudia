@@ -41,7 +41,7 @@ class ImportService:
         self._bulk_upsert(db, Insured, [insured.model_dump() for insured in payload.insureds], code_prefix="ASE")
         self._bulk_upsert(db, Provider, [provider.model_dump() for provider in payload.providers], code_prefix="PRO")
         self._bulk_upsert(db, Policy, [policy.model_dump() for policy in payload.policies], code_prefix="POL")
-        self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles])
+        self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles], code_prefix="VEH")
 
         policies_by_id = {policy.id: policy for policy in payload.policies}
         missing_policy_ids = {
@@ -67,6 +67,19 @@ class ImportService:
                     claim_data["days_from_policy_start"] = (claim_payload.occurrence_date - policy.start_date).days
                 if claim_data["days_from_policy_end"] is None:
                     claim_data["days_from_policy_end"] = (policy.end_date - claim_payload.occurrence_date).days
+            if policy and claim_data["branch"] is None:
+                claim_data["branch"] = policy.branch
+            insured_amount = claim_data.get("policy_insured_amount")
+            if insured_amount is None and policy:
+                insured_amount = policy.insured_amount
+                claim_data["policy_insured_amount"] = insured_amount
+            if (
+                claim_data.get("amount_to_insured_ratio") is None
+                and claim_payload.claimed_amount is not None
+                and insured_amount
+                and insured_amount > 0
+            ):
+                claim_data["amount_to_insured_ratio"] = claim_payload.claimed_amount / insured_amount
             if claim_payload.occurrence_date and claim_payload.reported_date and claim_data["report_delay_days"] is None:
                 claim_data["report_delay_days"] = (claim_payload.reported_date - claim_payload.occurrence_date).days
             if claim_payload.documents:

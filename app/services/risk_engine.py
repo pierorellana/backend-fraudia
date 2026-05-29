@@ -124,7 +124,7 @@ class RiskEngine:
         alerts.extend(self._policy_timing_alerts(claim, policy))
         alerts.extend(self._report_delay_alerts(claim))
         alerts.extend(self._frequency_alerts(context))
-        alerts.extend(self._provider_alerts(provider, context))
+        alerts.extend(self._provider_alerts(claim, provider, context))
         alerts.extend(self._document_alerts(claim.documents))
         alerts.extend(self._narrative_alerts(context))
         alerts.extend(self._amount_alerts(claim, policy, context))
@@ -373,14 +373,16 @@ class RiskEngine:
 
         return alerts
 
-    def _provider_alerts(self, provider: Provider | None, context: RiskContext) -> list[RuleAlert]:
+    def _provider_alerts(self, claim: Claim, provider: Provider | None, context: RiskContext) -> list[RuleAlert]:
         alerts: list[RuleAlert] = []
-        if provider and provider.is_restricted:
+        if claim.provider_restricted or (provider and provider.is_restricted):
+            provider_label = provider.name if provider else None
+            provider_label = provider_label or claim.provider_id or "registrado"
             alerts.append(
                 RuleAlert(
                     code="RF-04",
                     title="Proveedor en lista restrictiva",
-                    description=f"El proveedor {provider.name or provider.id} esta marcado como restringido.",
+                    description=f"El proveedor {provider_label} esta marcado como restringido.",
                     points=35,
                     severity=AlertSeverity.CRITICAL,
                 )
@@ -427,10 +429,11 @@ class RiskEngine:
         ]
 
     def _narrative_alerts(self, context: RiskContext) -> list[RuleAlert]:
-        if not context.similar_claim_id:
+        if not context.similar_claim_id and context.narrative_similarity < 0.65:
             return []
 
         similarity_percent = round(context.narrative_similarity * 100)
+        similar_claim = context.similar_claim_id or "referencia precalculada"
         if context.narrative_similarity >= 0.85:
             return [
                 RuleAlert(
@@ -438,7 +441,7 @@ class RiskEngine:
                     title="Narrativa posiblemente clonada",
                     description=(
                         f"La descripcion es {similarity_percent}% similar al siniestro "
-                        f"{context.similar_claim_id}."
+                        f"{similar_claim}."
                     ),
                     points=28,
                     severity=AlertSeverity.CRITICAL,
@@ -451,7 +454,7 @@ class RiskEngine:
                     title="Narrativa similar a reclamo previo",
                     description=(
                         f"La descripcion es {similarity_percent}% similar al siniestro "
-                        f"{context.similar_claim_id}."
+                        f"{similar_claim}."
                     ),
                     points=14,
                     severity=AlertSeverity.HIGH,
@@ -462,7 +465,7 @@ class RiskEngine:
     def _amount_alerts(self, claim: Claim, policy: Policy, context: RiskContext) -> list[RuleAlert]:
         alerts: list[RuleAlert] = []
         claimed_amount = claim.claimed_amount or Decimal("0")
-        insured_amount = policy.insured_amount or Decimal("0")
+        insured_amount = policy.insured_amount or claim.policy_insured_amount or Decimal("0")
         if insured_amount > 0:
             ratio = claimed_amount / insured_amount
             if ratio >= Decimal("0.95"):

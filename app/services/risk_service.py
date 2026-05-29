@@ -208,6 +208,9 @@ class RiskService:
                 Claim.days_from_policy_start,
                 Claim.days_from_policy_end,
                 Claim.report_delay_days,
+                Claim.provider_restricted,
+                Claim.narrative_similarity_max,
+                Claim.policy_insured_amount,
             ),
             selectinload(Claim.policy)
             .load_only(
@@ -218,6 +221,7 @@ class RiskService:
             )
             .selectinload(Policy.vehicles)
             .load_only(Vehicle.plate),
+            selectinload(Claim.vehicle).load_only(Vehicle.plate),
             selectinload(Claim.provider).load_only(
                 Provider.id,
                 Provider.name,
@@ -265,6 +269,11 @@ class RiskService:
         amount_z_score = self._amount_z_score(claim.claimed_amount, peer_amount_values)
 
         similar_claim_id, narrative_similarity = self._find_similar_claim(db, claim, use_embeddings=use_embeddings)
+        similar_claim_id, narrative_similarity = self._merge_precomputed_similarity(
+            claim,
+            similar_claim_id,
+            narrative_similarity,
+        )
 
         return RiskContext(
             insured_claim_count=insured_claim_count,
@@ -304,6 +313,11 @@ class RiskService:
             average_claimed_amount = self._average_claimed_amount_for_claim(claim, amount_stats)
             peer_amount_values = self._peer_amount_values_for_claim(claim, amount_stats)
             similar_claim_id, narrative_similarity = similar_claims.get(claim.id, (None, 0.0))
+            similar_claim_id, narrative_similarity = self._merge_precomputed_similarity(
+                claim,
+                similar_claim_id,
+                narrative_similarity,
+            )
             contexts[claim.id] = RiskContext(
                 insured_claim_count=insured_counts.get(claim.insured_id, 0),
                 vehicle_claim_count=vehicle_counts.get(claim.vehicle_plate, 0),
@@ -515,6 +529,21 @@ class RiskService:
         if best_score < 0.78:
             return None
         return best_id, best_score
+
+    def _merge_precomputed_similarity(
+        self,
+        claim: Claim,
+        similar_claim_id: str | None,
+        narrative_similarity: float,
+    ) -> tuple[str | None, float]:
+        if claim.narrative_similarity_max is None:
+            return similar_claim_id, narrative_similarity
+        precomputed = float(claim.narrative_similarity_max)
+        if precomputed > 1:
+            precomputed = precomputed / 100
+        if precomputed <= narrative_similarity:
+            return similar_claim_id, narrative_similarity
+        return similar_claim_id, precomputed
 
 
 def _is_uuid(value: str) -> bool:

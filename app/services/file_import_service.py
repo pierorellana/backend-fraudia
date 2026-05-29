@@ -4,19 +4,31 @@ from collections.abc import Iterable
 import csv
 from datetime import date, datetime
 from decimal import Decimal
+from decimal import InvalidOperation
 from io import BytesIO
 from io import StringIO
 from pathlib import Path
+import re
 from time import monotonic
 from typing import Any
+import unicodedata
+from uuid import NAMESPACE_URL
+from uuid import UUID
+from uuid import uuid5
 from uuid import uuid4
 
 from fastapi import UploadFile
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.domain import Claim
 from app.models.domain import ClaimDocument
+from app.models.domain import Insured
+from app.models.domain import Policy
+from app.models.domain import Provider
+from app.models.domain import Vehicle
 from app.schemas.claims import ClaimCreate
 from app.schemas.claims import ClaimDocumentCreate
 from app.schemas.claims import InsuredBase
@@ -66,25 +78,53 @@ DATASET_COLUMN_ALIASES = {
     "insureds": {
         "id_asegurado": {"id_asegurado", "id"},
         "code": {"code", "codigo", "codigo_asegurado"},
+        "nombres_asegurado": {"nombres_asegurado", "nombre_asegurado", "nombres", "nombre"},
         "segmento": {"segmento", "segment"},
         "antiguedad_meses": {"antiguedad_meses", "seniority_months"},
+        "antiguedad_anos": {"antiguedad_anos", "antiguedad_anios", "seniority_years"},
         "ciudad": {"ciudad", "city"},
-        "num_polizas": {"num_polizas", "policy_count"},
-        "reclamos_12m": {"reclamos_12m", "claims_12m"},
+        "num_polizas": {
+            "num_polizas",
+            "policy_count",
+            "n_polizas_activas",
+            "numero_polizas_activas",
+            "polizas_activas",
+        },
+        "reclamos_12m": {
+            "reclamos_12m",
+            "claims_12m",
+            "n_reclamos_ultimos_12_meses",
+            "numero_reclamos_ultimos_12_meses",
+            "reclamos_ultimos_12_meses",
+        },
         "mora_actual": {"mora_actual", "current_delinquency"},
         "score_cliente": {"score_cliente", "client_score"},
+        "reclamos_historico_total": {
+            "reclamos_historico_total",
+            "n_reclamos_historico_total",
+            "numero_reclamos_historico_total",
+        },
+        "reclamos_rc_sin_tercero": {"reclamos_rc_sin_tercero"},
+        "perfil_riesgo_historico": {"perfil_riesgo_historico"},
     },
     "providers": {
         "id_proveedor": {"id_proveedor", "id"},
         "code": {"code", "codigo", "codigo_proveedor"},
-        "nombre": {"nombre", "name"},
+        "nombre": {"nombre", "nombre_proveedor", "name"},
         "tipo": {"tipo", "provider_type"},
         "ciudad": {"ciudad", "city"},
-        "reclamos_asociados": {"reclamos_asociados", "associated_claims"},
-        "monto_promedio": {"monto_promedio", "average_amount"},
+        "reclamos_asociados": {
+            "reclamos_asociados",
+            "associated_claims",
+            "n_siniestros_asociados",
+            "numero_siniestros_asociados",
+            "siniestros_asociados",
+        },
+        "monto_promedio": {"monto_promedio", "promedio_monto", "average_amount"},
         "pct_casos_observados": {"pct_casos_observados", "observed_cases_pct"},
         "antiguedad_meses": {"antiguedad_meses", "seniority_months"},
         "en_lista_restrictiva": {"en_lista_restrictiva", "is_restricted"},
+        "motivo_restriccion": {"motivo_restriccion", "restriction_reason"},
     },
     "policies": {
         "id_poliza": {"id_poliza", "id"},
@@ -93,7 +133,7 @@ DATASET_COLUMN_ALIASES = {
         "ramo": {"ramo", "branch"},
         "fecha_inicio": {"fecha_inicio", "start_date"},
         "fecha_fin": {"fecha_fin", "end_date"},
-        "prima": {"prima", "premium_amount"},
+        "prima": {"prima", "prima_anual", "premium_amount"},
         "suma_asegurada": {"suma_asegurada", "insured_amount"},
         "deducible": {"deducible", "deductible"},
         "canal_venta": {"canal_venta", "sales_channel"},
@@ -102,7 +142,9 @@ DATASET_COLUMN_ALIASES = {
     },
     "vehicles": {
         "id_vehiculo": {"id_vehiculo", "id"},
+        "code": {"code", "codigo", "codigo_vehiculo"},
         "id_poliza": {"id_poliza", "policy_id"},
+        "id_asegurado": {"id_asegurado", "insured_id"},
         "placa": {"placa", "plate"},
         "chasis": {"chasis", "chassis"},
         "motor": {"motor", "engine"},
@@ -117,6 +159,8 @@ DATASET_COLUMN_ALIASES = {
         "id_poliza": {"id_poliza", "policy_id"},
         "id_asegurado": {"id_asegurado", "insured_id"},
         "id_proveedor": {"id_proveedor", "provider_id"},
+        "id_vehiculo": {"id_vehiculo", "vehicle_id"},
+        "placa_vehiculo_asegurado": {"placa_vehiculo_asegurado", "placa", "vehicle_plate"},
         "ramo": {"ramo", "branch"},
         "cobertura": {"cobertura", "coverage"},
         "fecha_ocurrencia": {"fecha_ocurrencia", "occurrence_date"},
@@ -126,12 +170,37 @@ DATASET_COLUMN_ALIASES = {
         "monto_pagado": {"monto_pagado", "paid_amount"},
         "estado": {"estado", "status"},
         "sucursal": {"sucursal", "office"},
-        "descripcion": {"descripcion", "description"},
-        "documentos_completos": {"documentos_completos", "documents_complete"},
+        "descripcion": {"descripcion", "descripcion_del_evento", "description"},
+        "documentos_completos": {"documentos_completos", "docs_completos", "documents_complete"},
         "dias_desde_inicio_poliza": {"dias_desde_inicio_poliza", "days_from_policy_start"},
-        "dias_desde_fin_poliza": {"dias_desde_fin_poliza", "days_from_policy_end"},
-        "dias_entre_ocurrencia_reporte": {"dias_entre_ocurrencia_reporte", "report_delay_days"},
-        "historial_siniestros_asegurado": {"historial_siniestros_asegurado", "insured_claim_history"},
+        "dias_desde_fin_poliza": {
+            "dias_desde_fin_poliza",
+            "dias_hasta_fin_poliza",
+            "days_from_policy_end",
+        },
+        "dias_entre_ocurrencia_reporte": {
+            "dias_entre_ocurrencia_reporte",
+            "dias_ocurr_reporte",
+            "report_delay_days",
+        },
+        "historial_siniestros_asegurado": {
+            "historial_siniestros_asegurado",
+            "n_reclamos_previos_asegurado",
+            "numero_reclamos_previos_asegurado",
+            "insured_claim_history",
+        },
+        "proveedor_lista_restrictiva": {
+            "proveedor_lista_restrictiva",
+            "prov_lista_restrictiva",
+            "provider_restricted",
+        },
+        "suma_asegurada": {"suma_asegurada", "insured_amount"},
+        "ratio_monto_suma_asegurada": {"ratio_monto_suma_asegurada", "amount_to_insured_ratio"},
+        "similitud_narrativa_max": {"similitud_narrativa_max", "narrative_similarity_max"},
+        "numero_parte_policial": {"numero_parte_policial", "police_report_number"},
+        "estado_flujo": {"estado_flujo", "workflow_status"},
+        "ultima_decision": {"ultima_decision", "last_decision"},
+        "ultima_revision_en": {"ultima_revision_en", "last_review_at"},
     },
     "documents": {
         "id_documento": {"id_documento", "id"},
@@ -142,6 +211,7 @@ DATASET_COLUMN_ALIASES = {
         "fecha_emision": {"fecha_emision", "issue_date"},
         "inconsistencia_detectada": {"inconsistencia_detectada", "inconsistency_detected"},
         "observacion": {"observacion", "notes"},
+        "nombre_archivo_pdf": {"nombre_archivo_pdf", "file_name_pdf"},
     },
 }
 
@@ -151,7 +221,18 @@ DATASET_ALLOWED_COLUMNS = {
 }
 
 DATASET_SIGNATURE_COLUMN_KEYS = {
-    "insureds": {"segmento", "num_polizas", "reclamos_12m", "mora_actual", "score_cliente"},
+    "insureds": {
+        "nombres_asegurado",
+        "segmento",
+        "antiguedad_anos",
+        "num_polizas",
+        "reclamos_12m",
+        "mora_actual",
+        "score_cliente",
+        "reclamos_historico_total",
+        "reclamos_rc_sin_tercero",
+        "perfil_riesgo_historico",
+    },
     "providers": {
         "nombre",
         "tipo",
@@ -159,6 +240,7 @@ DATASET_SIGNATURE_COLUMN_KEYS = {
         "monto_promedio",
         "pct_casos_observados",
         "en_lista_restrictiva",
+        "motivo_restriccion",
     },
     "policies": {
         "fecha_inicio",
@@ -169,9 +251,11 @@ DATASET_SIGNATURE_COLUMN_KEYS = {
         "canal_venta",
         "estado_poliza",
     },
-    "vehicles": {"id_vehiculo", "placa", "chasis", "motor", "marca", "modelo", "anio", "color"},
+    "vehicles": {"id_vehiculo", "id_asegurado", "placa", "chasis", "motor", "marca", "modelo", "anio", "color"},
     "claims": {
         "id_siniestro",
+        "id_vehiculo",
+        "placa_vehiculo_asegurado",
         "cobertura",
         "fecha_ocurrencia",
         "fecha_reporte",
@@ -186,6 +270,14 @@ DATASET_SIGNATURE_COLUMN_KEYS = {
         "dias_desde_fin_poliza",
         "dias_entre_ocurrencia_reporte",
         "historial_siniestros_asegurado",
+        "proveedor_lista_restrictiva",
+        "suma_asegurada",
+        "ratio_monto_suma_asegurada",
+        "similitud_narrativa_max",
+        "numero_parte_policial",
+        "estado_flujo",
+        "ultima_decision",
+        "ultima_revision_en",
     },
     "documents": {
         "id_documento",
@@ -195,6 +287,7 @@ DATASET_SIGNATURE_COLUMN_KEYS = {
         "fecha_emision",
         "inconsistencia_detectada",
         "observacion",
+        "nombre_archivo_pdf",
     },
 }
 
@@ -232,11 +325,14 @@ CLAIM_STATUS_NORMALIZATION = {
     "revision": "En revision",
     "en_revision": "En revision",
     "observado": "Observado",
+    "investigacion": "Investigacion",
     "pendiente": "Pendiente",
     "reserva": "Reserva",
     "cerrado": "Cerrado",
     "finalizado": "Finalizado",
     "pagado": "Pagado",
+    "pago_total": "Pago Total",
+    "pago_parcial": "Pago Parcial",
     "rechazado": "Rechazado",
     "anulado": "Anulado",
     "cancelado": "Cancelado",
@@ -250,6 +346,8 @@ POLICY_STATUS_NORMALIZATION = {
     "cancelado": "Cancelada",
     "vencida": "Vencida",
     "vencido": "Vencida",
+    "expirada": "Expirada",
+    "expirado": "Expirada",
 }
 
 
@@ -295,7 +393,7 @@ class FileImportService:
         self._validate_row_limit(rows_by_dataset)
         guard()
 
-        payload, standalone_documents = self._payload_from_rows(rows_by_dataset)
+        payload, standalone_documents, warnings, skipped_rows = self._payload_from_rows(db, rows_by_dataset)
         result = self.import_service.import_payload(
             db,
             payload,
@@ -317,6 +415,8 @@ class FileImportService:
             message="Archivo importado correctamente",
             filename=filename,
             datasets={name: len(rows_by_dataset.get(name, [])) for name in DATASET_ORDER},
+            warnings=warnings,
+            skipped_rows=skipped_rows,
             **result,
         )
 
@@ -338,7 +438,7 @@ class FileImportService:
             headers=headers,
         )
         self._validate_headers(dataset_key, headers, source=filename)
-        rows = [self._clean_row(row) for row in reader]
+        rows = [cleaned for row in reader if (cleaned := self._clean_row(row))]
         return {dataset_key: rows}
 
     def _resolve_csv_dataset(
@@ -441,32 +541,51 @@ class FileImportService:
 
     def _payload_from_rows(
         self,
+        db: Session,
         rows_by_dataset: dict[str, list[dict[str, Any]]],
-    ) -> tuple[DataImportPayload, list[tuple[str, ClaimDocumentCreate]]]:
+    ) -> tuple[DataImportPayload, list[tuple[str, ClaimDocumentCreate]], list[str], int]:
         payload = DataImportPayload()
         documents_by_claim: dict[str, list[ClaimDocumentCreate]] = {}
         standalone_documents: list[tuple[str, ClaimDocumentCreate]] = []
+        identities = self._load_identity_maps(db)
+        batch_code_owners: dict[str, dict[str, str]] = {dataset: {} for dataset in identities}
 
         errors: list[str] = []
+        warnings: list[str] = []
+        skipped_rows = 0
+        skipped_document_claim_codes: list[str] = []
         for dataset in DATASET_ORDER:
             rows = rows_by_dataset.get(dataset, [])
             for index, row in enumerate(rows, start=2):
                 try:
                     if dataset == "insureds":
-                        payload.insureds.append(InsuredBase(**self._map_insured(row)))
+                        payload.insureds.append(InsuredBase(**self._map_insured(row, identities, batch_code_owners)))
                     elif dataset == "providers":
-                        payload.providers.append(ProviderBase(**self._map_provider(row)))
+                        payload.providers.append(ProviderBase(**self._map_provider(row, identities, batch_code_owners)))
                     elif dataset == "policies":
-                        payload.policies.append(PolicyBase(**self._map_policy(row)))
+                        payload.policies.append(PolicyBase(**self._map_policy(row, identities, batch_code_owners)))
                     elif dataset == "vehicles":
-                        payload.vehicles.append(VehicleBase(**self._map_vehicle(row)))
+                        payload.vehicles.append(VehicleBase(**self._map_vehicle(row, identities, batch_code_owners)))
                     elif dataset == "claims":
-                        payload.claims.append(ClaimCreate(**self._map_claim(row)))
+                        payload.claims.append(ClaimCreate(**self._map_claim(row, identities, batch_code_owners)))
                     elif dataset == "documents":
                         document = ClaimDocumentCreate(**self._map_document(row))
-                        claim_id = self._value(row, "id_siniestro", "claim_id")
-                        if not claim_id:
+                        raw_claim_id = self._value(row, "id_siniestro", "claim_id")
+                        if not raw_claim_id:
                             raise ValueError("documentos requiere id_siniestro")
+                        claim_id = self._resolve_reference(
+                            row,
+                            "claims",
+                            identities,
+                            "id_siniestro",
+                            "claim_id",
+                            required=False,
+                        )
+                        if not claim_id:
+                            skipped_rows += 1
+                            if len(skipped_document_claim_codes) < 5:
+                                skipped_document_claim_codes.append(self._clean_code(raw_claim_id) or str(raw_claim_id))
+                            continue
                         documents_by_claim.setdefault(str(claim_id), []).append(document)
                 except (ValidationError, ValueError, TypeError) as exc:
                     errors.append(f"{dataset} fila {index}: {exc}")
@@ -484,7 +603,15 @@ class FileImportService:
                     if claim_id not in claim_ids_in_payload:
                         standalone_documents.extend((claim_id, document) for document in documents)
 
-        return payload, standalone_documents
+        if skipped_rows:
+            examples = ", ".join(dict.fromkeys(skipped_document_claim_codes))
+            examples_text = f" (ejemplos: {examples})" if examples else ""
+            warnings.append(
+                f"Se omitieron {skipped_rows} documentos porque referencian siniestros no cargados"
+                f"{examples_text}."
+            )
+
+        return payload, standalone_documents, warnings, skipped_rows
 
     def _import_standalone_documents(
         self,
@@ -499,29 +626,201 @@ class FileImportService:
             db.commit()
         return claim_ids
 
-    def _map_insured(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _load_identity_maps(self, db: Session) -> dict[str, dict[str, str]]:
+        models = {
+            "insureds": Insured,
+            "providers": Provider,
+            "policies": Policy,
+            "vehicles": Vehicle,
+            "claims": Claim,
+        }
+        identity_maps: dict[str, dict[str, str]] = {dataset: {} for dataset in models}
+        for dataset, model in models.items():
+            rows = db.execute(
+                select(model.id, model.code).where(model.code.is_not(None))
+            ).all()
+            identity_maps[dataset] = {
+                clean_code: str(record_id)
+                for record_id, code in rows
+                if (clean_code := self._clean_code(code))
+            }
+        for record_id, plate in db.execute(select(Vehicle.id, Vehicle.plate).where(Vehicle.plate.is_not(None))).all():
+            if clean_plate := self._clean_code(plate):
+                identity_maps["vehicles"][clean_plate] = str(record_id)
+        return identity_maps
+
+    def _record_identity(
+        self,
+        row: dict[str, Any],
+        dataset: str,
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+        *,
+        id_keys: tuple[str, ...],
+        code_keys: tuple[str, ...],
+    ) -> tuple[str, str | None]:
+        raw_id = self._value(row, *id_keys)
+        explicit_code = self._value(row, *code_keys)
+        raw_id_text = self._clean_text(raw_id)
+        code = self._clean_code(explicit_code)
+        raw_id_is_uuid = bool(raw_id_text and self._is_uuid(raw_id_text))
+
+        if raw_id_is_uuid:
+            record_id = raw_id_text
+        else:
+            code = code or self._clean_code(raw_id_text)
+            record_id = identities[dataset].get(code or "")
+            if record_id is None:
+                record_id = self._stable_id(dataset, code) if code else str(uuid4())
+
+        if code:
+            batch_owner = batch_code_owners[dataset].get(code)
+            if batch_owner and batch_owner != record_id:
+                raise ValueError(f"Codigo duplicado en la carga de {DATASET_LABELS[dataset]}: {code}.")
+            existing_id = identities[dataset].get(code)
+            if existing_id and existing_id != record_id:
+                if raw_id_is_uuid:
+                    raise ValueError(
+                        f"Codigo duplicado en {DATASET_LABELS[dataset]}: {code} ya pertenece a {existing_id}."
+                    )
+                record_id = existing_id
+            identities[dataset][code] = record_id
+            batch_code_owners[dataset][code] = record_id
+
+        return record_id, code
+
+    def _resolve_reference(
+        self,
+        row: dict[str, Any],
+        dataset: str,
+        identities: dict[str, dict[str, str]],
+        *keys: str,
+        required: bool = True,
+    ) -> str | None:
+        value = self._value(row, *keys)
+        if value is None:
+            if required:
+                raise ValueError(f"Campo requerido faltante: {keys[0]}")
+            return None
+
+        text = self._clean_text(value)
+        if not text:
+            if required:
+                raise ValueError(f"Campo requerido faltante: {keys[0]}")
+            return None
+        if self._is_uuid(text):
+            return text
+
+        code = self._clean_code(text)
+        record_id = identities[dataset].get(code or "")
+        if record_id:
+            return record_id
+        if required:
+            raise ValueError(
+                f"No se encontro {DATASET_LABELS[dataset]} con code={code}. "
+                "Importa primero el dataset relacionado o incluye la hoja en el mismo Excel."
+            )
+        return None
+
+    def _vehicle_id_value(self, row: dict[str, Any], identities: dict[str, dict[str, str]]) -> str | None:
+        vehicle_id = self._resolve_reference(
+            row,
+            "vehicles",
+            identities,
+            "id_vehiculo",
+            "vehicle_id",
+            required=False,
+        )
+        if vehicle_id:
+            return vehicle_id
+
+        plate = self._clean_code(self._value(row, "placa_vehiculo_asegurado", "placa", "vehicle_plate"))
+        if not plate or plate == "N/A":
+            return None
+        return identities["vehicles"].get(plate)
+
+    def _document_id_value(self, row: dict[str, Any]) -> str:
+        raw_id = self._value(row, "id_documento", "id")
+        text = self._clean_text(raw_id)
+        if text and self._is_uuid(text):
+            return text
+        code = self._clean_code(text)
+        return self._stable_id("documents", code) if code else str(uuid4())
+
+    def _map_insured(
+        self,
+        row: dict[str, Any],
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        record_id, code = self._record_identity(
+            row,
+            "insureds",
+            identities,
+            batch_code_owners,
+            id_keys=("id_asegurado", "id"),
+            code_keys=("code", "codigo", "codigo_asegurado"),
+        )
         return {
-            "id": self._uuid_value(row, "id_asegurado", "id"),
-            "code": self._value(row, "code", "codigo", "codigo_asegurado"),
+            "id": record_id,
+            "code": code,
+            "name": self._value(row, "nombres_asegurado", "nombre_asegurado", "nombres", "nombre"),
             "segment": self._value(row, "segmento", "segment"),
-            "seniority_months": self._int_value(row, "antiguedad_meses", "seniority_months"),
+            "seniority_months": self._seniority_months_value(row),
             "city": self._value(row, "ciudad", "city"),
-            "policy_count": self._int_value(row, "num_polizas", "policy_count", default=0),
-            "claims_12m": self._int_value(row, "reclamos_12m", "claims_12m", default=0),
+            "policy_count": self._int_value(
+                row,
+                "num_polizas",
+                "policy_count",
+                "n_polizas_activas",
+                "numero_polizas_activas",
+                "polizas_activas",
+                default=0,
+            ),
+            "claims_12m": self._int_value(
+                row,
+                "reclamos_12m",
+                "claims_12m",
+                "n_reclamos_ultimos_12_meses",
+                "numero_reclamos_ultimos_12_meses",
+                "reclamos_ultimos_12_meses",
+                default=0,
+            ),
             "current_delinquency": self._bool_value(row, "mora_actual", "current_delinquency", default=False),
             "client_score": self._decimal_value(row, "score_cliente", "client_score"),
+            "historical_claims_total": self._int_value(
+                row,
+                "reclamos_historico_total",
+                "n_reclamos_historico_total",
+                "numero_reclamos_historico_total",
+            ),
+            "rc_claims_without_third_party": self._int_value(row, "reclamos_rc_sin_tercero"),
+            "historical_risk_profile": self._value(row, "perfil_riesgo_historico"),
         }
 
-    def _map_policy(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _map_policy(
+        self,
+        row: dict[str, Any],
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        record_id, code = self._record_identity(
+            row,
+            "policies",
+            identities,
+            batch_code_owners,
+            id_keys=("id_poliza", "id"),
+            code_keys=("code", "codigo", "codigo_poliza"),
+        )
         return {
-            "id": self._uuid_value(row, "id_poliza", "id"),
-            "code": self._value(row, "code", "codigo", "codigo_poliza"),
-            "insured_id": self._required(row, "id_asegurado", "insured_id"),
+            "id": record_id,
+            "code": code,
+            "insured_id": self._resolve_reference(row, "insureds", identities, "id_asegurado", "insured_id"),
             "branch": self._normalized_option(row, BRANCH_NORMALIZATION, "ramo", "branch")
             or self._required(row, "ramo", "branch"),
             "start_date": self._date_value(row, "fecha_inicio", "start_date", required=True),
             "end_date": self._date_value(row, "fecha_fin", "end_date", required=True),
-            "premium_amount": self._decimal_value(row, "prima", "premium_amount"),
+            "premium_amount": self._decimal_value(row, "prima", "prima_anual", "premium_amount"),
             "insured_amount": self._decimal_value(row, "suma_asegurada", "insured_amount"),
             "deductible": self._decimal_value(row, "deducible", "deductible"),
             "sales_channel": self._value(row, "canal_venta", "sales_channel"),
@@ -529,24 +828,68 @@ class FileImportService:
             "status": self._normalized_option(row, POLICY_STATUS_NORMALIZATION, "estado_poliza", "status"),
         }
 
-    def _map_provider(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _map_provider(
+        self,
+        row: dict[str, Any],
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        record_id, code = self._record_identity(
+            row,
+            "providers",
+            identities,
+            batch_code_owners,
+            id_keys=("id_proveedor", "id"),
+            code_keys=("code", "codigo", "codigo_proveedor"),
+        )
         return {
-            "id": self._uuid_value(row, "id_proveedor", "id"),
-            "code": self._value(row, "code", "codigo", "codigo_proveedor"),
-            "name": self._value(row, "nombre", "name"),
+            "id": record_id,
+            "code": code,
+            "name": self._value(row, "nombre", "nombre_proveedor", "name"),
             "provider_type": self._value(row, "tipo", "provider_type"),
             "city": self._value(row, "ciudad", "city"),
-            "associated_claims": self._int_value(row, "reclamos_asociados", "associated_claims", default=0),
-            "average_amount": self._decimal_value(row, "monto_promedio", "average_amount"),
+            "associated_claims": self._int_value(
+                row,
+                "reclamos_asociados",
+                "associated_claims",
+                "n_siniestros_asociados",
+                "numero_siniestros_asociados",
+                "siniestros_asociados",
+                default=0,
+            ),
+            "average_amount": self._decimal_value(row, "monto_promedio", "promedio_monto", "average_amount"),
             "observed_cases_pct": self._decimal_value(row, "pct_casos_observados", "observed_cases_pct"),
             "seniority_months": self._int_value(row, "antiguedad_meses", "seniority_months"),
             "is_restricted": self._bool_value(row, "en_lista_restrictiva", "is_restricted", default=False),
+            "restriction_reason": self._value(row, "motivo_restriccion", "restriction_reason"),
         }
 
-    def _map_vehicle(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "id": self._uuid_value(row, "id_vehiculo", "id"),
-            "policy_id": self._required(row, "id_poliza", "policy_id"),
+    def _map_vehicle(
+        self,
+        row: dict[str, Any],
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        record_id, code = self._record_identity(
+            row,
+            "vehicles",
+            identities,
+            batch_code_owners,
+            id_keys=("id_vehiculo", "id"),
+            code_keys=("code", "codigo", "codigo_vehiculo"),
+        )
+        mapped = {
+            "id": record_id,
+            "code": code,
+            "policy_id": self._resolve_reference(row, "policies", identities, "id_poliza", "policy_id"),
+            "insured_id": self._resolve_reference(
+                row,
+                "insureds",
+                identities,
+                "id_asegurado",
+                "insured_id",
+                required=False,
+            ),
             "plate": self._value(row, "placa", "plate"),
             "chassis": self._value(row, "chasis", "chassis"),
             "engine": self._value(row, "motor", "engine"),
@@ -555,41 +898,107 @@ class FileImportService:
             "year": self._int_value(row, "anio", "year"),
             "color": self._value(row, "color"),
         }
+        if clean_plate := self._clean_code(mapped["plate"]):
+            identities["vehicles"][clean_plate] = record_id
+        return mapped
 
-    def _map_claim(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _map_claim(
+        self,
+        row: dict[str, Any],
+        identities: dict[str, dict[str, str]],
+        batch_code_owners: dict[str, dict[str, str]],
+    ) -> dict[str, Any]:
+        record_id, code = self._record_identity(
+            row,
+            "claims",
+            identities,
+            batch_code_owners,
+            id_keys=("id_siniestro", "id"),
+            code_keys=("code", "codigo", "codigo_siniestro"),
+        )
+        policy_insured_amount = self._decimal_value(row, "suma_asegurada", "insured_amount")
+        amount_ratio = self._decimal_value(row, "ratio_monto_suma_asegurada", "amount_to_insured_ratio")
+        claimed_amount = self._decimal_value(row, "monto_reclamado", "claimed_amount")
+        if amount_ratio is None and policy_insured_amount and policy_insured_amount > 0 and claimed_amount is not None:
+            amount_ratio = claimed_amount / policy_insured_amount
+
         return {
-            "id": self._uuid_value(row, "id_siniestro", "id"),
-            "code": self._value(row, "code", "codigo", "codigo_siniestro"),
-            "policy_id": self._required(row, "id_poliza", "policy_id"),
-            "insured_id": self._required(row, "id_asegurado", "insured_id"),
-            "provider_id": self._value(row, "id_proveedor", "provider_id"),
+            "id": record_id,
+            "code": code,
+            "policy_id": self._resolve_reference(row, "policies", identities, "id_poliza", "policy_id"),
+            "insured_id": self._resolve_reference(row, "insureds", identities, "id_asegurado", "insured_id"),
+            "provider_id": self._resolve_reference(
+                row,
+                "providers",
+                identities,
+                "id_proveedor",
+                "provider_id",
+                required=False,
+            ),
+            "vehicle_id": self._vehicle_id_value(row, identities),
             "branch": self._normalized_option(row, BRANCH_NORMALIZATION, "ramo", "branch"),
             "coverage": self._value(row, "cobertura", "coverage"),
             "occurrence_date": self._date_value(row, "fecha_ocurrencia", "occurrence_date"),
             "reported_date": self._date_value(row, "fecha_reporte", "reported_date"),
-            "claimed_amount": self._decimal_value(row, "monto_reclamado", "claimed_amount"),
+            "claimed_amount": claimed_amount,
             "estimated_amount": self._decimal_value(row, "monto_estimado", "estimated_amount"),
             "paid_amount": self._decimal_value(row, "monto_pagado", "paid_amount"),
             "status": self._normalized_option(row, CLAIM_STATUS_NORMALIZATION, "estado", "status"),
             "office": self._value(row, "sucursal", "office"),
-            "description": self._value(row, "descripcion", "description"),
-            "documents_complete": self._bool_value(row, "documentos_completos", "documents_complete", default=False),
+            "description": self._value(row, "descripcion", "descripcion_del_evento", "description"),
+            "documents_complete": self._bool_value(
+                row,
+                "documentos_completos",
+                "docs_completos",
+                "documents_complete",
+                default=False,
+            ),
             "days_from_policy_start": self._int_value(row, "dias_desde_inicio_poliza", "days_from_policy_start"),
-            "days_from_policy_end": self._int_value(row, "dias_desde_fin_poliza", "days_from_policy_end"),
-            "report_delay_days": self._int_value(row, "dias_entre_ocurrencia_reporte", "report_delay_days"),
+            "days_from_policy_end": self._int_value(
+                row,
+                "dias_desde_fin_poliza",
+                "dias_hasta_fin_poliza",
+                "days_from_policy_end",
+            ),
+            "report_delay_days": self._int_value(
+                row,
+                "dias_entre_ocurrencia_reporte",
+                "dias_ocurr_reporte",
+                "report_delay_days",
+            ),
             "insured_claim_history": self._int_value(
                 row,
                 "historial_siniestros_asegurado",
+                "n_reclamos_previos_asegurado",
+                "numero_reclamos_previos_asegurado",
                 "insured_claim_history",
                 default=0,
             ),
+            "workflow_status": self._value(row, "estado_flujo", "workflow_status"),
+            "last_decision": self._value(row, "ultima_decision", "last_decision"),
+            "last_review_at": self._datetime_value(row, "ultima_revision_en", "last_review_at"),
+            "provider_restricted": self._bool_value(
+                row,
+                "proveedor_lista_restrictiva",
+                "prov_lista_restrictiva",
+                "provider_restricted",
+                default=False,
+            ),
+            "narrative_similarity_max": self._decimal_value(
+                row,
+                "similitud_narrativa_max",
+                "narrative_similarity_max",
+            ),
+            "police_report_number": self._value(row, "numero_parte_policial", "police_report_number"),
+            "policy_insured_amount": policy_insured_amount,
+            "amount_to_insured_ratio": amount_ratio,
         }
 
     def _map_document(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
-            "id": self._uuid_value(row, "id_documento", "id"),
+            "id": self._document_id_value(row),
             "document_type": self._value(row, "tipo_documento", "document_type"),
-            "delivered": self._bool_value(row, "entregado", "delivered", default=False),
+            "delivered": self._bool_value(row, "entregado", "delivered", default=True),
             "legible": self._bool_value(row, "legible", default=True),
             "issue_date": self._date_value(row, "fecha_emision", "issue_date"),
             "inconsistency_detected": self._bool_value(
@@ -599,6 +1008,7 @@ class FileImportService:
                 default=False,
             ),
             "notes": self._value(row, "observacion", "notes"),
+            "file_name_pdf": self._value(row, "nombre_archivo_pdf", "file_name_pdf"),
         }
 
     def _sheet_rows(
@@ -627,6 +1037,11 @@ class FileImportService:
     def _resolve_dataset(self, raw: str | None, *, required: bool = True) -> str | None:
         key = self._normalize_header(raw)
         dataset = SUPPORTED_DATASETS.get(key)
+        if dataset is None:
+            for token in key.split("_"):
+                if token in SUPPORTED_DATASETS:
+                    dataset = SUPPORTED_DATASETS[token]
+                    break
         if dataset is None and required:
             allowed = ", ".join(sorted({key for key in SUPPORTED_DATASETS if key in {"asegurados", "polizas", "proveedores", "vehiculos", "siniestros", "documentos"}}))
             raise ValueError(f"Dataset no soportado: {raw}. Usa uno de: {allowed}.")
@@ -686,28 +1101,35 @@ class FileImportService:
             key = self._normalize_header(raw_key)
             if not key:
                 continue
-            if isinstance(value, str):
-                value = value.strip()
-            if value == "":
-                value = None
-            cleaned[key] = value
+            cleaned_value = self._clean_cell_value(value)
+            if cleaned_value is not None:
+                cleaned[key] = cleaned_value
         return cleaned
 
     def _normalize_header(self, value: Any) -> str:
         if value is None:
             return ""
-        normalized = str(value).strip().lower()
-        replacements = {
-            "á": "a",
-            "é": "e",
-            "í": "i",
-            "ó": "o",
-            "ú": "u",
-            "ñ": "n",
-        }
-        for original, replacement in replacements.items():
-            normalized = normalized.replace(original, replacement)
-        return normalized.replace(" ", "_").replace("-", "_")
+        normalized = unicodedata.normalize("NFKD", str(value).strip().lower())
+        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+        normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
+        return re.sub(r"_+", "_", normalized).strip("_")
+
+    def _clean_cell_value(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if self._is_blank_marker(text):
+            return None
+        return text
+
+    def _clean_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return None if self._is_blank_marker(text) else text
+
+    def _is_blank_marker(self, value: str) -> bool:
+        return value.strip().lower() in {"", "-", "--", "—", "n/a", "na", "null", "none", "sin dato"}
 
     def _value(self, row: dict[str, Any], *keys: str) -> Any:
         for key in keys:
@@ -748,7 +1170,10 @@ class FileImportService:
         value = self._value(row, *keys)
         if value is None:
             return default
-        return int(float(str(value).replace(",", ".")))
+        try:
+            return int(Decimal(self._numeric_text(value)))
+        except InvalidOperation as exc:
+            raise ValueError(f"Valor numerico invalido: {value}") from exc
 
     def _decimal_value(self, row: dict[str, Any], *keys: str) -> Decimal | None:
         value = self._value(row, *keys)
@@ -756,7 +1181,33 @@ class FileImportService:
             return None
         if isinstance(value, Decimal):
             return value
-        return Decimal(str(value).replace(",", "."))
+        try:
+            return Decimal(self._numeric_text(value))
+        except InvalidOperation as exc:
+            raise ValueError(f"Valor numerico invalido: {value}") from exc
+
+    def _seniority_months_value(self, row: dict[str, Any]) -> int | None:
+        months = self._int_value(row, "antiguedad_meses", "seniority_months")
+        if months is not None:
+            return months
+        years = self._int_value(row, "antiguedad_anos", "antiguedad_anios", "seniority_years")
+        return years * 12 if years is not None else None
+
+    def _numeric_text(self, value: Any) -> str:
+        text = str(value).strip()
+        text = re.sub(r"[^\d,.\-+eE]", "", text)
+        if not text or not re.search(r"\d", text):
+            raise ValueError(f"Valor numerico invalido: {value}")
+        if "e" in text.lower():
+            return text.replace(",", ".")
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            text = text.replace(",", ".")
+        return text
 
     def _date_value(self, row: dict[str, Any], *keys: str, required: bool = False) -> date | None:
         value = self._value(row, *keys)
@@ -775,3 +1226,37 @@ class FileImportService:
             except ValueError:
                 continue
         return date.fromisoformat(text)
+
+    def _datetime_value(self, row: dict[str, Any], *keys: str) -> datetime | None:
+        value = self._value(row, *keys)
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+        text = str(value).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return datetime.fromisoformat(text)
+
+    def _clean_code(self, value: Any) -> str | None:
+        text = self._clean_text(value)
+        if text is None:
+            return None
+        return text.upper()
+
+    def _is_uuid(self, value: Any) -> bool:
+        try:
+            UUID(str(value))
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _stable_id(self, dataset: str, code: str | None) -> str:
+        if not code:
+            return str(uuid4())
+        return str(uuid5(NAMESPACE_URL, f"asur-antifraude:{dataset}:{code}"))

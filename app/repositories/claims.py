@@ -40,6 +40,7 @@ class ClaimRepository:
                     Claim.policy_id,
                     Claim.insured_id,
                     Claim.provider_id,
+                    Claim.vehicle_id,
                     Claim.branch,
                     Claim.coverage,
                     Claim.occurrence_date,
@@ -55,6 +56,14 @@ class ClaimRepository:
                     Claim.days_from_policy_end,
                     Claim.report_delay_days,
                     Claim.insured_claim_history,
+                    Claim.workflow_status,
+                    Claim.last_decision,
+                    Claim.last_review_at,
+                    Claim.provider_restricted,
+                    Claim.narrative_similarity_max,
+                    Claim.police_report_number,
+                    Claim.policy_insured_amount,
+                    Claim.amount_to_insured_ratio,
                 ),
                 selectinload(Claim.documents).load_only(
                     ClaimDocument.document_type,
@@ -63,6 +72,7 @@ class ClaimRepository:
                     ClaimDocument.issue_date,
                     ClaimDocument.inconsistency_detected,
                     ClaimDocument.notes,
+                    ClaimDocument.file_name_pdf,
                 ),
                 selectinload(Claim.policy)
                 .load_only(
@@ -79,8 +89,10 @@ class ClaimRepository:
                 )
                 .selectinload(Policy.vehicles)
                 .load_only(Vehicle.plate),
+                selectinload(Claim.vehicle).load_only(Vehicle.plate),
                 selectinload(Claim.insured).load_only(
                     Insured.code,
+                    Insured.name,
                     Insured.segment,
                     Insured.seniority_months,
                     Insured.city,
@@ -88,6 +100,9 @@ class ClaimRepository:
                     Insured.claims_12m,
                     Insured.current_delinquency,
                     Insured.client_score,
+                    Insured.historical_claims_total,
+                    Insured.rc_claims_without_third_party,
+                    Insured.historical_risk_profile,
                 ),
                 selectinload(Claim.provider).load_only(
                     Provider.code,
@@ -99,6 +114,7 @@ class ClaimRepository:
                     Provider.observed_cases_pct,
                     Provider.seniority_months,
                     Provider.is_restricted,
+                    Provider.restriction_reason,
                 ),
                 selectinload(Claim.risk_assessment)
                 .load_only(

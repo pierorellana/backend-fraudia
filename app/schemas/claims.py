@@ -13,6 +13,7 @@ from app.schemas.risk import RiskAssessmentRead
 class InsuredBase(BaseModel):
     id: str
     code: str | None = Field(default=None, max_length=20)
+    name: str | None = None
     segment: str | None = None
     seniority_months: int | None = None
     city: str | None = None
@@ -20,6 +21,9 @@ class InsuredBase(BaseModel):
     claims_12m: int = 0
     current_delinquency: bool = False
     client_score: Decimal | None = None
+    historical_claims_total: int | None = None
+    rc_claims_without_third_party: int | None = None
+    historical_risk_profile: str | None = None
 
 
 class InsuredRead(InsuredBase):
@@ -66,6 +70,7 @@ class ProviderBase(BaseModel):
     observed_cases_pct: Decimal | None = None
     seniority_months: int | None = None
     is_restricted: bool = False
+    restriction_reason: str | None = None
 
 
 class ProviderRead(ProviderBase):
@@ -77,6 +82,8 @@ class ProviderRead(ProviderBase):
 class VehicleBase(BaseModel):
     id: str
     policy_id: str
+    insured_id: str | None = None
+    code: str | None = Field(default=None, max_length=20)
     plate: str | None = None
     chassis: str | None = None
     engine: str | None = None
@@ -95,11 +102,12 @@ class VehicleRead(VehicleBase):
 class ClaimDocumentCreate(BaseModel):
     id: str
     document_type: str | None = None
-    delivered: bool = False
+    delivered: bool = True
     legible: bool = True
     issue_date: date | None = None
     inconsistency_detected: bool = False
     notes: str | None = None
+    file_name_pdf: str | None = None
 
 
 class ClaimDocumentRead(ClaimDocumentCreate):
@@ -116,6 +124,7 @@ class ClaimCreate(BaseModel):
     policy_id: str
     insured_id: str
     provider_id: str | None = None
+    vehicle_id: str | None = None
     branch: str | None = None
     coverage: str | None = None
     occurrence_date: date | None = None
@@ -131,6 +140,14 @@ class ClaimCreate(BaseModel):
     days_from_policy_end: int | None = None
     report_delay_days: int | None = None
     insured_claim_history: int = 0
+    workflow_status: str | None = None
+    last_decision: str | None = None
+    last_review_at: datetime | None = None
+    provider_restricted: bool = False
+    narrative_similarity_max: Decimal | None = None
+    police_report_number: str | None = None
+    policy_insured_amount: Decimal | None = None
+    amount_to_insured_ratio: Decimal | None = None
     documents: list[ClaimDocumentCreate] = []
 
     @model_validator(mode="after")
@@ -146,6 +163,7 @@ class ClaimRead(BaseModel):
     policy_id: str
     insured_id: str
     provider_id: str | None = None
+    vehicle_id: str | None = None
     branch: str | None = None
     coverage: str | None = None
     occurrence_date: date | None = None
@@ -161,6 +179,14 @@ class ClaimRead(BaseModel):
     days_from_policy_end: int | None = None
     report_delay_days: int | None = None
     insured_claim_history: int = 0
+    workflow_status: str | None = None
+    last_decision: str | None = None
+    last_review_at: datetime | None = None
+    provider_restricted: bool = False
+    narrative_similarity_max: Decimal | None = None
+    police_report_number: str | None = None
+    policy_insured_amount: Decimal | None = None
+    amount_to_insured_ratio: Decimal | None = None
     vehicle_plate: str | None = None
     documents: list[ClaimDocumentRead] = []
     risk_assessment: RiskAssessmentRead | None = None
@@ -182,6 +208,7 @@ class ClaimDocumentDetailRead(BaseModel):
     issue_date: date | None = None
     inconsistency_detected: bool = False
     notes: str | None = None
+    file_name_pdf: str | None = None
     status: str
 
     model_config = ConfigDict(from_attributes=True)
@@ -229,6 +256,7 @@ class PolicyDetailRead(BaseModel):
 
 class InsuredDetailRead(BaseModel):
     code: str | None = None
+    name: str | None = None
     segment: str | None = None
     seniority_months: int | None = None
     city: str | None = None
@@ -236,6 +264,9 @@ class InsuredDetailRead(BaseModel):
     claims_12m: int = 0
     current_delinquency: bool = False
     client_score: Decimal | None = None
+    historical_claims_total: int | None = None
+    rc_claims_without_third_party: int | None = None
+    historical_risk_profile: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -250,6 +281,7 @@ class ProviderDetailRead(BaseModel):
     observed_cases_pct: Decimal | None = None
     seniority_months: int | None = None
     is_restricted: bool = False
+    restriction_reason: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -271,6 +303,14 @@ class ClaimOptimizedDetailRead(BaseModel):
     days_from_policy_end: int | None = None
     report_delay_days: int | None = None
     insured_claim_history: int = 0
+    workflow_status: str | None = None
+    last_decision: str | None = None
+    last_review_at: datetime | None = None
+    provider_restricted: bool = False
+    narrative_similarity_max: Decimal | None = None
+    police_report_number: str | None = None
+    policy_insured_amount: Decimal | None = None
+    amount_to_insured_ratio: Decimal | None = None
     vehicle_plate: str | None = None
     documents: list[ClaimDocumentDetailRead] = []
     risk_assessment: RiskAssessmentDetailRead | None = None

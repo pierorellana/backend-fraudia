@@ -435,6 +435,69 @@ def test_csv_file_import_for_documents_with_claim_id_column() -> None:
         assert "claim_id" not in documents[0]
 
 
+def test_csv_file_import_accepts_business_codes_and_human_headers() -> None:
+    insureds_csv = (
+        "ID Asegurado,Nombres Asegurado,Segmento,Ciudad,Antigüedad (años),"
+        "N° Pólizas Activas,N° Reclamos Últimos 12 Meses,N° Reclamos Histórico Total,"
+        "Reclamos RC sin Tercero,Perfil Riesgo Histórico\n"
+        "ASEG-0010,García Morales Luis Eduardo,Natural,Quito,7,1,2,2,0,Medio\n"
+    )
+    providers_csv = (
+        "ID Proveedor,Nombre Proveedor,Tipo,Ciudad,N° Siniestros Asociados,"
+        "En Lista Restrictiva,Motivo Restricción,Promedio Monto ($)\n"
+        "PROV-019,Servicios Hogar Ecuador,Servicios,Quito,10,No,—,22930\n"
+    )
+    policies_csv = (
+        "ID Póliza,ID Asegurado,Ramo,Fecha Inicio,Fecha Fin,Suma Asegurada ($),"
+        "Prima Anual ($),Canal Venta,Estado Póliza\n"
+        "POL-0001,ASEG-0010,Vehículos,2024-08-10,2025-08-10,20000,564,Broker,Expirada\n"
+    )
+    claims_csv = (
+        "ID Siniestro,ID Póliza,ID Asegurado,Ramo,Placa Vehículo Asegurado,Cobertura,"
+        "Fecha Ocurrencia,Fecha Reporte,Días Ocurr→Reporte,Monto Reclamado ($),"
+        "Monto Estimado ($),Monto Pagado ($),Estado,Sucursal,ID Proveedor,"
+        "Descripción del Evento,Docs Completos,Prov. Lista Restrictiva,"
+        "Días desde Inicio Póliza,Días hasta Fin Póliza,N° Reclamos Previos Asegurado,"
+        "Suma Asegurada ($),Similitud Narrativa Máx.,Número Parte Policial\n"
+        "SIN-0001,POL-0001,ASEG-0010,Vehículos,N/A,Robo,2024-09-01,2024-09-04,"
+        "3,5000,4500,0,Reserva,Quito,PROV-019,Robo de equipo electrónico,No,No,"
+        "22,343,2,20000,0.10,PP-2024-0001\n"
+    )
+    documents_csv = (
+        "ID Documento,ID Siniestro,Tipo Documento,Nombre Archivo PDF\n"
+        "DOC-0001,SIN-0001,Fotografías del daño,fotos.pdf\n"
+        "DOC-0002,SIN-9999,Denuncia policial,denuncia.pdf\n"
+    )
+
+    with TestClient(app) as client:
+        uploads = [
+            ("3_Asegurados.csv", insureds_csv),
+            ("4_Proveedores.csv", providers_csv),
+            ("2_Polizas.csv", policies_csv),
+            ("siniestros_50_registros.csv", claims_csv),
+            ("5_Documentos.csv", documents_csv),
+        ]
+        for filename, content in uploads:
+            response = client.post(
+                "/api/imports/file",
+                files={"file": (filename, content, "text/csv")},
+            )
+            assert response.status_code == 200, response.json()
+            if filename == "5_Documentos.csv":
+                assert response.json()["data"]["skipped_rows"] == 1
+                assert response.json()["data"]["warnings"]
+
+        detail = client.get("/api/claims/SIN-0001")
+        assert detail.status_code == 200
+        data = detail.json()["data"]
+        assert data["code"] == "SIN-0001"
+        assert data["policy"]["code"] == "POL-0001"
+        assert data["insured"]["code"] == "ASEG-0010"
+        assert data["insured"]["name"] == "García Morales Luis Eduardo"
+        assert data["provider"]["code"] == "PROV-019"
+        assert data["documents"][0]["file_name_pdf"] == "fotos.pdf"
+
+
 def test_csv_file_import_rejects_mismatched_filename_and_dataset() -> None:
     csv_content = (
         "id_vehiculo,id_poliza,placa,chasis,motor,marca,modelo,anio,color\n"

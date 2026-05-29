@@ -8,6 +8,7 @@ CODED_TABLES = (
     ("asegurados", "id_asegurado", "ASE"),
     ("polizas", "id_poliza", "POL"),
     ("proveedores", "id_proveedor", "PRO"),
+    ("vehiculos", "id_vehiculo", "VEH"),
     ("siniestros", "id_siniestro", "SIN"),
 )
 

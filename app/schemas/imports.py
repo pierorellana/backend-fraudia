@@ -28,3 +28,5 @@ class FileImportResponse(DataImportResponse):
     message: str
     datasets: dict[str, int]
     filename: str
+    warnings: list[str] = []
+    skipped_rows: int = 0
