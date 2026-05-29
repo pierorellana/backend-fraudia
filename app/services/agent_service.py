@@ -74,11 +74,11 @@ class AgentService:
                 sources=quick_sources,
             )
 
-        fast_claim_answer = self._fast_claim_answer(db, question=question, claim_id=resolved_claim_id)
-        if fast_claim_answer:
-            self._store_exchange(db, session=session, question=question, answer=fast_claim_answer)
+        claim_guardrail_answer = self._claim_guardrail_answer(db, question=question, claim_id=resolved_claim_id)
+        if claim_guardrail_answer:
+            self._store_exchange(db, session=session, question=question, answer=claim_guardrail_answer)
             return AgentResponse(
-                answer=fast_claim_answer,
+                answer=claim_guardrail_answer,
                 session_id=session.id if session else None,
                 claim_id=resolved_claim_id,
                 sources=sources,
@@ -425,6 +425,22 @@ class AgentService:
 
         return None
 
+    def _claim_guardrail_answer(self, db: Session, *, question: str, claim_id: str | None) -> str | None:
+        if not claim_id:
+            return None
+
+        normalized = normalize_text(question).strip()
+        claim_label = self._claim_label_from_id(db, claim_id)
+        if self._is_auto_decision_request(normalized):
+            claim = self.claims.get_by_id(db, claim_id)
+            if not claim:
+                return f"No encontre el siniestro {claim_id}."
+            return self._auto_decision_answer(claim)
+
+        if self._is_out_of_scope(normalized) or self._is_unknown_claim_question(normalized):
+            return self._out_of_scope_answer(normalized, claim_label)
+        return None
+
     def _resolve_claim_id(self, db: Session, claim_id: str) -> str:
         normalized_identifier = claim_id.strip()
         filters = [Claim.code == normalized_identifier.upper()]
@@ -437,6 +453,14 @@ class AgentService:
         return str(resolved_claim_id)
 
     def _answer_claim_question(self, db: Session, *, claim: Claim, normalized_question: str) -> str:
+        if self._is_concise_request(normalized_question):
+            return self._claim_concise_answer(claim)
+        if self._is_narrative_request(normalized_question):
+            return self._claim_narrative_answer(db, claim)
+        if self._is_provider_alert_request(normalized_question):
+            return self._claim_provider_alert_answer(claim)
+        if self._is_amount_request(normalized_question):
+            return self._claim_amount_answer(claim)
         if self._is_summary_request(normalized_question):
             return self._explain_claim(db, claim)
         if self._is_next_steps_request(normalized_question):
@@ -568,6 +592,29 @@ class AgentService:
         )
         return any(phrase in normalized for phrase in off_domain_phrases)
 
+    def _is_unknown_claim_question(self, normalized: str) -> bool:
+        if self._has_domain_terms(normalized) or self._is_claim_followup_request(normalized):
+            return False
+        return True
+
+    def _is_claim_followup_request(self, normalized: str) -> bool:
+        return any(
+            (
+                self._is_summary_request(normalized),
+                self._is_next_steps_request(normalized),
+                self._is_document_request(normalized),
+                self._is_status_request(normalized),
+                self._is_reason_request(normalized),
+                self._is_overview_request(normalized),
+                self._is_concise_request(normalized),
+                self._is_narrative_request(normalized),
+                self._is_provider_alert_request(normalized),
+                self._is_amount_request(normalized),
+                self._is_auto_decision_request(normalized),
+                self._is_redaction_request(normalized),
+            )
+        )
+
     def _has_domain_terms(self, normalized: str) -> bool:
         return any(
             term in normalized
@@ -582,6 +629,7 @@ class AgentService:
                 "proveedor",
                 "document",
                 "soporte",
+                "monto",
                 "monto reclamado",
                 "monto atipico",
                 "suma asegurada",
@@ -593,6 +641,84 @@ class AgentService:
                 "reporte",
                 "revision",
                 "resumen ejecutivo",
+                "narrativa",
+                "clonada",
+                "rechazar",
+                "aprobar",
+            )
+        )
+
+    def _is_concise_request(self, normalized: str) -> bool:
+        return any(
+            phrase in normalized
+            for phrase in (
+                "hazlo mas corto",
+                "mas corto",
+                "resumelo",
+                "breve",
+                "en corto",
+                "en pocas palabras",
+            )
+        )
+
+    def _is_narrative_request(self, normalized: str) -> bool:
+        return "narrativa" in normalized or "clonada" in normalized or any(
+            phrase in normalized
+            for phrase in (
+                "no entendi",
+                "no entiendo",
+                "explicamelo",
+                "mas simple",
+                "en simple",
+            )
+        )
+
+    def _is_redaction_request(self, normalized: str) -> bool:
+        return any(
+            phrase in normalized
+            for phrase in (
+                "redacta",
+                "reformula",
+                "version",
+                "comite",
+                "formal",
+                "humano",
+                "mas humana",
+                "analista junior",
+                "justificacion",
+                "justificar",
+            )
+        )
+
+    def _is_provider_alert_request(self, normalized: str) -> bool:
+        return "proveedor" in normalized and any(
+            term in normalized for term in ("alerta", "explica", "explicame", "riesgo", "restrictiva")
+        )
+
+    def _is_amount_request(self, normalized: str) -> bool:
+        return any(
+            phrase in normalized
+            for phrase in (
+                "monto",
+                "valor reclamado",
+                "cantidad reclamada",
+                "suma asegurada",
+                "hay algo raro",
+                "atipico",
+                "atipica",
+            )
+        )
+
+    def _is_auto_decision_request(self, normalized: str) -> bool:
+        return any(
+            phrase in normalized
+            for phrase in (
+                "rechazar automaticamente",
+                "rechazo automatico",
+                "puedes rechazar",
+                "debo rechazar",
+                "aprobar automaticamente",
+                "decision automatica",
             )
         )
 
@@ -615,7 +741,12 @@ class AgentService:
             for phrase in (
                 "que debo revisar",
                 "que revisar",
+                "que reviso",
+                "que hago",
                 "revisar primero",
+                "reviso primero",
+                "5 minutos",
+                "cinco minutos",
                 "siguiente paso",
                 "siguientes pasos",
                 "proximos pasos",
@@ -655,8 +786,27 @@ class AgentService:
                 "marcado",
                 "alto riesgo",
                 "alertas",
+                "principales",
+                "importantes",
                 "explica",
                 "explicame",
+                "explicamelo",
+                "que significa",
+                "significa",
+            )
+        )
+
+    def _is_overview_request(self, normalized: str) -> bool:
+        return any(
+            phrase in normalized
+            for phrase in (
+                "detalle",
+                "detalles",
+                "mas informacion",
+                "amplia",
+                "ampliame",
+                "cuentame",
+                "contexto",
             )
         )
 
@@ -773,6 +923,103 @@ class AgentService:
             note = f" - {document.notes}" if document.notes else ""
             rows.append(f"- {document.document_type or 'Documento'}: {document.status}{note}")
         return f"Documentos del siniestro {label}:\n" + "\n".join(rows)
+
+    def _claim_concise_answer(self, claim: Claim) -> str:
+        label = self._claim_label(claim)
+        assessment = claim.risk_assessment
+        if not assessment:
+            return f"En corto: {label} aun no tiene score calculado."
+
+        alerts = self._top_alerts(claim, limit=2)
+        signals = ", ".join(alert.title.lower() for alert in alerts) or "sin alertas principales"
+        return (
+            f"En corto: {label} esta en nivel {assessment.level} con score {assessment.score}/100. "
+            f"Las senales principales son {signals}. Recomendacion: {assessment.suggested_action}."
+        )
+
+    def _claim_narrative_answer(self, db: Session, claim: Claim) -> str:
+        label = self._claim_label(claim)
+        alert = self._find_alert(claim, codes={"RF-06"}, terms=("narrativa", "clonada", "similar"))
+        if not alert:
+            return (
+                f"No veo una alerta de narrativa clonada registrada para {label}. "
+                "Si quieres, puedo revisar las alertas principales o los documentos del caso."
+            )
+
+        description = self._display_alert_description(db, alert.description or "")
+        return (
+            f"La alerta de narrativa en {label} significa que la descripcion del siniestro se parece mucho "
+            "a la de otro reclamo previo.\n\n"
+            f"Detalle: {description}\n\n"
+            "En simple: no prueba fraude por si sola, pero sugiere comparar fechas, documentos, relato del "
+            "asegurado y soportes para confirmar que no sea una repeticion o copia."
+        )
+
+    def _claim_provider_alert_answer(self, claim: Claim) -> str:
+        label = self._claim_label(claim)
+        alert = self._find_alert(claim, codes={"RF-04"}, terms=("proveedor", "restrictiva"))
+        if not alert:
+            return (
+                f"No veo una alerta critica de proveedor registrada para {label}. "
+                "Puedo revisar otras alertas del siniestro si lo necesitas."
+            )
+
+        return (
+            f"La alerta del proveedor en {label} indica: {alert.description or 'sin descripcion adicional.'}\n\n"
+            "Que revisaria: validar antecedentes del proveedor, relacion con otros reclamos, soportes emitidos "
+            "y si existe restriccion interna vigente antes de avanzar con pagos o aprobaciones."
+        )
+
+    def _claim_amount_answer(self, claim: Claim) -> str:
+        label = self._claim_label(claim)
+        amount_alerts = [
+            alert
+            for alert in self._top_alerts(claim, limit=10)
+            if alert.code in {"RF-07", "RF-09"} or "monto" in normalize_text(alert.title or "")
+        ]
+        if not amount_alerts:
+            return (
+                f"No veo una alerta especifica de monto atipico registrada para {label}. "
+                f"El monto reclamado es {claim.claimed_amount or 'no informado'}; igual conviene contrastarlo "
+                "contra cobertura, suma asegurada e historico comparable."
+            )
+
+        rows = "\n".join(
+            f"- {alert.title}: {alert.description or 'Sin descripcion adicional.'} (+{alert.points or 0})"
+            for alert in amount_alerts[:3]
+        )
+        return (
+            f"Si, hay senales relacionadas con el monto en {label}:\n"
+            f"{rows}\n\n"
+            "Recomendacion: validar cobertura, suma asegurada, cotizaciones/soportes y compararlo contra casos similares."
+        )
+
+    def _auto_decision_answer(self, claim: Claim) -> str:
+        label = self._claim_label(claim)
+        assessment = claim.risk_assessment
+        risk_text = (
+            f" El caso esta en nivel {assessment.level} con score {assessment.score}/100."
+            if assessment
+            else ""
+        )
+        return (
+            f"No, no debo rechazar automaticamente el siniestro {label}.{risk_text} "
+            "El agente solo prioriza y explica senales de riesgo; la decision final debe tomarla un analista "
+            "con evidencia documentada, revision humana y cumplimiento del proceso interno."
+        )
+
+    def _find_alert(
+        self,
+        claim: Claim,
+        *,
+        codes: set[str],
+        terms: tuple[str, ...],
+    ) -> RiskAlert | None:
+        for alert in self._top_alerts(claim, limit=20):
+            searchable = normalize_text(f"{alert.code or ''} {alert.title or ''} {alert.description or ''}")
+            if alert.code in codes or any(term in searchable for term in terms):
+                return alert
+        return None
 
     def _top_alerts(self, claim: Claim, *, limit: int = 5) -> list[RiskAlert]:
         assessment = claim.risk_assessment

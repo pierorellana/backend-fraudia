@@ -1,6 +1,8 @@
 from pathlib import Path
 import os
 
+import pytest
+
 DB_PATH = Path(__file__).with_name("test_antifraude.db")
 if DB_PATH.exists():
     DB_PATH.unlink()
@@ -103,6 +105,29 @@ def import_test_payload(payload: dict, *, reset: bool = True) -> dict[str, int]:
         return ImportService().import_payload(db, DataImportPayload(**payload), reset=reset)
     finally:
         db.close()
+
+
+def payload_with_agent_claim() -> dict:
+    payload = base_payload()
+    payload["claims"] = [
+        {
+            "id": CLAIM_ID,
+            "code": CLAIM_CODE,
+            "policy_id": POLICY_ID,
+            "insured_id": INSURED_ID,
+            "provider_id": PROVIDER_ID,
+            "branch": "Vehiculos",
+            "coverage": "Robo",
+            "occurrence_date": "2026-01-03",
+            "reported_date": "2026-01-10",
+            "claimed_amount": "24000",
+            "status": "Reserva",
+            "office": "Quito Norte",
+            "description": "Robo total del vehiculo durante madrugada sin testigos.",
+            "documents": [],
+        }
+    ]
+    return payload
 
 
 def test_import_service_and_top_risk_cases() -> None:
@@ -609,6 +634,148 @@ def test_agent_explains_claim_without_llm() -> None:
         assert response_payload["data"]["used_llm"] is False
         assert response_payload["data"]["claim_id"] == CLAIM_ID
         assert CLAIM_CODE in response_payload["data"]["answer"]
+
+
+def test_agent_uses_ollama_for_common_claim_questions_when_requested(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ollama_enabled", True)
+
+    def answer_from_llm(self, *, question: str, context: str) -> str | None:
+        assert CLAIM_CODE in context
+        return f"Respuesta Ollama para: {question}"
+
+    monkeypatch.setattr(OllamaClient, "chat", answer_from_llm)
+
+    questions = [
+        "cual es el nivel de riesgo actual?",
+        "por que fue marcado como alto riesgo?",
+        "cuales son las alertas mas importantes?",
+        "explicame la alerta del proveedor",
+        "que significa narrativa posiblemente clonada?",
+        "hay algo raro con el monto reclamado?",
+        "prepara un resumen ejecutivo para mi supervisor",
+        "hazlo mas corto",
+        "que accion recomiendas tomar?",
+        "no entendi lo de la narrativa, explicamelo mas simple",
+        "si solo tengo 5 minutos, que reviso?",
+    ]
+
+    with TestClient(app) as client:
+        import_test_payload(payload_with_agent_claim())
+
+        for question in questions:
+            response = client.post(
+                "/api/agent/query",
+                json={
+                    "question": question,
+                    "claim_id": CLAIM_CODE,
+                    "use_llm": True,
+                },
+            )
+
+            assert response.status_code == 200, question
+            data = response.json()["data"]
+            assert data["used_llm"] is True, question
+            assert data["answer"] == f"Respuesta Ollama para: {question}"
+
+
+def test_agent_blocks_automatic_decision_without_ollama(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ollama_enabled", True)
+
+    def fail_if_called(self, *, question: str, context: str) -> str | None:
+        raise AssertionError("Automatic decision requests should be handled locally")
+
+    monkeypatch.setattr(OllamaClient, "chat", fail_if_called)
+
+    with TestClient(app) as client:
+        import_test_payload(payload_with_agent_claim())
+
+        response = client.post(
+            "/api/agent/query",
+            json={
+                "question": "puedes rechazar automaticamente este siniestro?",
+                "claim_id": CLAIM_CODE,
+                "use_llm": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["used_llm"] is False
+        assert CLAIM_CODE in data["answer"]
+        assert "no debo rechazar automaticamente" in data["answer"].lower()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "hola",
+        "gracias",
+        "que puedes hacer?",
+    ],
+)
+def test_agent_answers_small_talk_without_ollama(monkeypatch, question: str) -> None:
+    monkeypatch.setattr(settings, "ollama_enabled", True)
+
+    def fail_if_called(self, *, question: str, context: str) -> str | None:
+        raise AssertionError("Ollama should not be used for small talk")
+
+    monkeypatch.setattr(OllamaClient, "chat", fail_if_called)
+
+    with TestClient(app) as client:
+        import_test_payload(payload_with_agent_claim())
+
+        response = client.post(
+            "/api/agent/query",
+            json={
+                "question": question,
+                "claim_id": CLAIM_CODE,
+                "use_llm": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["used_llm"] is False
+        assert CLAIM_CODE in data["answer"] or "agente" in data["answer"].lower()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "quiero saber la suma de dos numeros",
+        "cuanto es 2 + 2?",
+        "como centro un div?",
+        "dime tu color favorito",
+        "cuentame un chiste",
+        "dame una receta de pasta",
+        "quien gano el mundial?",
+    ],
+)
+def test_agent_rejects_out_of_scope_claim_questions_without_ollama(monkeypatch, question: str) -> None:
+    monkeypatch.setattr(settings, "ollama_enabled", True)
+
+    def fail_if_called(self, *, question: str, context: str) -> str | None:
+        raise AssertionError("Ollama should not be used for out-of-scope questions")
+
+    monkeypatch.setattr(OllamaClient, "chat", fail_if_called)
+
+    with TestClient(app) as client:
+        import_test_payload(payload_with_agent_claim())
+
+        response = client.post(
+            "/api/agent/query",
+            json={
+                "question": question,
+                "claim_id": CLAIM_CODE,
+                "use_llm": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["used_llm"] is False
+        assert data["answer"].startswith("Lo siento")
+        assert CLAIM_CODE in data["answer"]
 
 
 def test_agent_keeps_claim_session_history() -> None:
