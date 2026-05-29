@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     import_max_rows: int = 5000
     import_timeout_seconds: float = 60.0
-
+    demo_user_id: str | None = None
     model_config = SettingsConfigDict(
         env_file=(".env", "backend/.env"),
         env_file_encoding="utf-8",

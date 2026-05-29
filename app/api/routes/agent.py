@@ -26,7 +26,7 @@ def query_agent(payload: AgentQuery, db: Session = Depends(get_db)) -> GeneralRe
                 db,
                 question=payload.question,
                 session_id=payload.session_id,
-                user_id=payload.user_id,
+                user_id=payload.user_id ,
                 claim_id=payload.claim_id,
                 use_llm=payload.use_llm,
                 context=payload.context,

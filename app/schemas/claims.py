@@ -149,7 +149,7 @@ class ClaimCreate(BaseModel):
     ratio_to_insured_amount: Decimal | None = None
     max_narrative_similarity: Decimal | None = None
     police_report_number: str | None = None
-    simulated_fraud_label: str | None = None
+    simulated_fraud_label: int | None = None
     documents: list[ClaimDocumentCreate] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -212,7 +212,7 @@ class ClaimRead(BaseModel):
     ratio_to_insured_amount: Decimal | None = None
     max_narrative_similarity: Decimal | None = None
     police_report_number: str | None = None
-    simulated_fraud_label: str | None = None
+    simulated_fraud_label: int | None = None
     vehicle_plate: str | None = None
     documents: list[ClaimDocumentRead] = Field(default_factory=list)
     risk_assessment: RiskAssessmentRead | None = None
@@ -247,7 +247,7 @@ class ClaimDetailRead(BaseModel):
     ratio_to_insured_amount: Decimal | None = None
     max_narrative_similarity: Decimal | None = None
     police_report_number: str | None = None
-    simulated_fraud_label: str | None = None
+    simulated_fraud_label: int | None = None
     vehicle: VehicleRead | None = None
     policy: PolicyRead | None = None
     insured: InsuredRead | None = None

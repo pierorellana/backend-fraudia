@@ -10,8 +10,8 @@ class RiskAlertRead(BaseModel):
     id: str | None = None
     claim_id: str | None = None
     assessment_id: str | None = None
-    rule_id: str | None = None
-    condition_id: str | None = None
+    rule_id: int | None = None
+    condition_id: int | None = None
     code: str | None = None
     title: str
     rule_name: str | None = None

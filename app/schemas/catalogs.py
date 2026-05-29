@@ -2,7 +2,7 @@ from pydantic import BaseModel
 
 
 class CatalogItemRead(BaseModel):
-    id: str | None = None
+    id: int | None = None
     code: str
     name: str
     description: str | None = None

@@ -52,7 +52,7 @@ class AgentService:
         use_llm: bool | None = None,
         context: AgentQueryContext | None = None,
     ) -> AgentResponse:
-        session = self._resolve_session(db, session_id=session_id, user_id=user_id, claim_id=claim_id, question=question)
+        session = self._resolve_session(db, session_id=session_id, user_id=user_id or settings.demo_user_id, claim_id=claim_id, question=question)
         raw_claim_identifier = claim_id or (context.claim_id if context else None) or (session.claim_id if session else None)
         resolved_claim_id = raw_claim_identifier
         if raw_claim_identifier:
@@ -109,7 +109,7 @@ class AgentService:
     ) -> ChatSession:
         session = ChatSession(
             id=str(uuid4()),
-            user_id=user_id,
+            user_id=user_id or settings.demo_user_id,
             title=title or "Sesion de analisis",
             created_at=self._utc_now(),
             updated_at=self._utc_now(),
