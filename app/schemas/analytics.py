@@ -15,6 +15,16 @@ class BranchCountItem(BaseModel):
     count: int
 
 
+class CityCountItem(BaseModel):
+    ciudad: str
+    count: int
+
+
+class ReviewStatusItem(BaseModel):
+    estado_flujo: str
+    count: int
+
+
 class RiskLevelCountItem(BaseModel):
     nivel_riesgo: str
     count: int
@@ -50,6 +60,7 @@ class ProviderRiskSummary(BaseModel):
     high_risk_claims: int
     average_score: float
     total_claimed_amount: Decimal
+    total_alerts: int = 0
     is_restricted: bool
 
 
@@ -58,6 +69,7 @@ class ProviderDashboardItem(BaseModel):
     tipo: str
     casos_alto_riesgo: int
     score_promedio: float
+    total_alertas: int = 0
 
 
 class ProviderDashboardSummary(BaseModel):

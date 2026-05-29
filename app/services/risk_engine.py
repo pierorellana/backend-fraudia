@@ -9,40 +9,13 @@ from app.models.domain import Claim
 from app.models.domain import ClaimDocument
 from app.models.domain import Policy
 from app.models.domain import Provider
-from app.models.enums import AlertSeverity
 from app.models.enums import RiskLevel
 
 
-@dataclass(frozen=True)
-class RuleAlert:
-    code: str
-    title: str
-    description: str
-    points: int
-    severity: AlertSeverity
-
-
-@dataclass(frozen=True)
-class RiskContext:
-    insured_claim_count: int
-    vehicle_claim_count: int
-    driver_claim_count: int
-    provider_claim_count: int
-    average_claimed_amount: Decimal | None
-    peer_claim_count: int
-    amount_z_score: float | None
-    similar_claim_id: str | None
-    narrative_similarity: float
-
-
-@dataclass(frozen=True)
-class RiskEvaluation:
-    score: int
-    level: RiskLevel
-    suggested_action: str
-    explanation: str
-    alerts: list[RuleAlert]
-
+ETHICAL_DISCLAIMER = (
+    "Este resultado identifica posibles alertas y requiere revision humana; "
+    "no constituye una acusacion ni una decision automatica."
+)
 
 STOPWORDS = {
     "a",
@@ -68,16 +41,48 @@ STOPWORDS = {
 }
 
 
-SUSPICIOUS_DYNAMIC_TERMS = (
-    "sin testigos",
-    "noche",
-    "madrugada",
-    "llaves dentro",
-    "conductor desconocido",
-    "tercero no identificado",
-    "version contradictoria",
-    "estacionado",
-)
+@dataclass(frozen=True)
+class RuleDefinition:
+    code: str
+    name: str
+    category: str
+    description: str
+    default_severity: str
+    conditions: list[dict]
+
+
+@dataclass(frozen=True)
+class EvaluationAlert:
+    code: str
+    title: str
+    rule_name: str
+    category: str
+    description: str
+    points: int
+    severity: str
+    detected_value: str | None
+    recommendation: str
+    condition_code: str | None = None
+
+
+@dataclass(frozen=True)
+class RiskContext:
+    narrative_similarity: float
+    similar_claim_code: str | None
+    ai_model_score: int = 0
+
+
+@dataclass(frozen=True)
+class RiskEvaluation:
+    score_rules: int
+    score_ai_model: int
+    score_nlp: int
+    score: int
+    level: RiskLevel
+    recommendation: str
+    explanation: str
+    ethical_disclaimer: str
+    alerts: list[EvaluationAlert]
 
 
 def normalize_text(value: str) -> str:
@@ -99,6 +104,106 @@ def jaccard_similarity(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
+def rule_catalog() -> list[RuleDefinition]:
+    return [
+        RuleDefinition(
+            code="RP-001",
+            name="Reclamo cercano al borde de vigencia",
+            category="Vigencia",
+            description="Evalua cercania del evento al inicio o fin de la poliza.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-001-A", "description": "0 a 10 dias", "operator": "<=", "threshold_value": "10", "points": 8, "severity": "amarillo"},
+                {"code": "RP-001-B", "description": "11 a 30 dias", "operator": "between", "threshold_value": "11-30", "points": 4, "severity": "verde"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-002",
+            name="Reporte tardio",
+            category="Temporalidad",
+            description="Evalua dias transcurridos entre ocurrencia y reporte.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-002-A", "description": "Mayor a 7 dias", "operator": ">", "threshold_value": "7", "points": 5, "severity": "amarillo"},
+                {"code": "RP-002-B", "description": "Entre 4 y 7 dias", "operator": "between", "threshold_value": "4-7", "points": 3, "severity": "verde"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-003",
+            name="Alta frecuencia asegurado",
+            category="Comportamiento",
+            description="Evalua historial previo del asegurado.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-003-A", "description": "3 o mas reclamos", "operator": ">=", "threshold_value": "3", "points": 8, "severity": "amarillo"},
+                {"code": "RP-003-B", "description": "2 reclamos", "operator": "=", "threshold_value": "2", "points": 4, "severity": "verde"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-004",
+            name="Proveedor recurrente o restrictivo",
+            category="Proveedor",
+            description="Evalua recurrencia o inclusion en lista restrictiva.",
+            default_severity="rojo",
+            conditions=[
+                {"code": "RP-004-A", "description": "Proveedor en lista restrictiva", "operator": "=", "threshold_value": "true", "points": 10, "severity": "critico"},
+                {"code": "RP-004-B", "description": "Proveedor con mas de 2 reclamos asociados", "operator": ">", "threshold_value": "2", "points": 5, "severity": "amarillo"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-005",
+            name="Documentos incompletos",
+            category="Documentacion",
+            description="Evalua si faltan documentos del expediente.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-005-A", "description": "Documentacion incompleta", "operator": "=", "threshold_value": "false", "points": 4, "severity": "amarillo"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-006",
+            name="Narrativa similar",
+            category="NLP",
+            description="Evalua similitud de narrativas contra otros siniestros.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-006-A", "description": "Similitud >= 0.85", "operator": ">=", "threshold_value": "0.85", "points": 8, "severity": "amarillo"},
+                {"code": "RP-006-B", "description": "Similitud 0.70 a 0.84", "operator": "between", "threshold_value": "0.70-0.84", "points": 4, "severity": "verde"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-007",
+            name="Monto cercano a suma asegurada",
+            category="Monto",
+            description="Evalua cercania entre monto reclamado y suma asegurada.",
+            default_severity="amarillo",
+            conditions=[
+                {"code": "RP-007-A", "description": "Ratio >= 0.95", "operator": ">=", "threshold_value": "0.95", "points": 5, "severity": "amarillo"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-008",
+            name="Documentos inconsistentes",
+            category="Documentacion",
+            description="Evalua inconsistencias o ilegibilidad grave en documentos.",
+            default_severity="rojo",
+            conditions=[
+                {"code": "RP-008-A", "description": "Documento inconsistente o ilegible", "operator": "=", "threshold_value": "true", "points": 10, "severity": "critico"},
+            ],
+        ),
+        RuleDefinition(
+            code="RP-009",
+            name="Cobertura critica por perdida total y robo",
+            category="Cobertura",
+            description="Evalua combinacion de perdida total con robo o PTxRB.",
+            default_severity="rojo",
+            conditions=[
+                {"code": "RP-009-A", "description": "Cobertura critica", "operator": "contains", "threshold_value": "PTxRB", "points": 10, "severity": "critico"},
+            ],
+        ),
+    ]
+
+
 def classify_score(score: int) -> RiskLevel:
     if score <= 40:
         return RiskLevel.LOW
@@ -107,439 +212,401 @@ def classify_score(score: int) -> RiskLevel:
     return RiskLevel.HIGH
 
 
-def suggested_action(level: RiskLevel) -> str:
+def recommendation_for_level(level: RiskLevel) -> str:
     if level == RiskLevel.HIGH:
-        return "Escalar a revision especializada antifraude"
+        return "Escalar a revision especializada antifraude antes de continuar el flujo."
     if level == RiskLevel.MEDIUM:
-        return "Escalar a revision documental"
-    return "Continuar flujo normal con monitoreo"
+        return "Solicitar revision humana prioritaria con foco en documentos y consistencia del caso."
+    return "Continuar el flujo normal con monitoreo y validaciones rutinarias."
 
 
 class RiskEngine:
+    def __init__(self) -> None:
+        self.rule_map = {rule.code: rule for rule in rule_catalog()}
+
     def evaluate(self, claim: Claim, context: RiskContext) -> RiskEvaluation:
-        alerts: list[RuleAlert] = []
+        alerts: list[EvaluationAlert] = []
+        critical_red = False
+        critical_yellow = False
         policy = claim.policy
         provider = claim.provider
 
-        alerts.extend(self._policy_timing_alerts(claim, policy))
-        alerts.extend(self._report_delay_alerts(claim))
-        alerts.extend(self._frequency_alerts(context))
-        alerts.extend(self._provider_alerts(provider, context))
-        alerts.extend(self._document_alerts(claim.documents))
-        alerts.extend(self._narrative_alerts(context))
-        alerts.extend(self._amount_alerts(claim, policy, context))
-        alerts.extend(self._anomaly_alerts(context))
-        alerts.extend(self._dynamic_alerts(claim.description or ""))
+        border_alert, border_yellow = self._policy_timing_alert(claim, policy)
+        if border_alert:
+            alerts.append(border_alert)
+        critical_yellow = critical_yellow or border_yellow
 
-        score = min(sum(alert.points for alert in alerts), 100)
-        if any(alert.severity == AlertSeverity.CRITICAL for alert in alerts):
-            score = max(score, 76)
+        report_alert = self._report_delay_alert(claim)
+        if report_alert:
+            alerts.append(report_alert)
+
+        frequency_alert = self._frequency_alert(claim)
+        if frequency_alert:
+            alerts.append(frequency_alert)
+
+        provider_alert, provider_red = self._provider_alert(claim, provider)
+        if provider_alert:
+            alerts.append(provider_alert)
+        critical_red = critical_red or provider_red
+
+        documents_incomplete_alert = self._documents_incomplete_alert(claim)
+        if documents_incomplete_alert:
+            alerts.append(documents_incomplete_alert)
+
+        nlp_alert, score_nlp, narrative_yellow = self._narrative_alert(context)
+        if nlp_alert:
+            alerts.append(nlp_alert)
+        critical_yellow = critical_yellow or narrative_yellow
+
+        amount_alert = self._insured_amount_alert(claim, policy)
+        if amount_alert:
+            alerts.append(amount_alert)
+
+        inconsistent_documents_alert, documents_red = self._documents_inconsistent_alert(claim.documents)
+        if inconsistent_documents_alert:
+            alerts.append(inconsistent_documents_alert)
+        critical_red = critical_red or documents_red
+
+        coverage_alert, coverage_red = self._critical_coverage_alert(claim.coverage)
+        if coverage_alert:
+            alerts.append(coverage_alert)
+        critical_red = critical_red or coverage_red
+
+        score_ai_model = max(context.ai_model_score, 0)
+        score_rules = sum(alert.points for alert in alerts if alert.code != "RP-006")
+        score = min(100, score_rules + score_ai_model + score_nlp)
+        if critical_red:
+            score = max(score, 85)
+        elif critical_yellow:
+            score = max(score, 60)
 
         level = classify_score(score)
-        explanation = self._build_explanation(score, level, alerts)
+        if critical_red:
+            level = RiskLevel.HIGH
+        elif critical_yellow and level == RiskLevel.LOW:
+            level = RiskLevel.MEDIUM
+
+        recommendation = recommendation_for_level(level)
+        explanation = self._build_explanation(level, alerts, context, recommendation)
 
         return RiskEvaluation(
+            score_rules=score_rules,
+            score_ai_model=score_ai_model,
+            score_nlp=score_nlp,
             score=score,
             level=level,
-            suggested_action=suggested_action(level),
+            recommendation=recommendation,
             explanation=explanation,
-            alerts=alerts,
+            ethical_disclaimer=ETHICAL_DISCLAIMER,
+            alerts=[
+                EvaluationAlert(
+                    code=alert.code,
+                    title=alert.title,
+                    rule_name=alert.rule_name,
+                    category=alert.category,
+                    description=alert.description,
+                    points=alert.points,
+                    severity=alert.severity,
+                    detected_value=alert.detected_value,
+                    recommendation=recommendation,
+                    condition_code=alert.condition_code,
+                )
+                for alert in alerts
+            ],
         )
 
-    def _policy_timing_alerts(self, claim: Claim, policy: Policy) -> list[RuleAlert]:
-        alerts: list[RuleAlert] = []
-        if not claim.occurrence_date:
-            return alerts
+    def _policy_timing_alert(self, claim: Claim, policy: Policy | None) -> tuple[EvaluationAlert | None, bool]:
+        start_days = claim.days_from_policy_start
+        end_days = claim.days_from_policy_end
+        if claim.occurrence_date and policy:
+            if start_days is None and policy.start_date:
+                start_days = (claim.occurrence_date - policy.start_date).days
+            if end_days is None and policy.end_date:
+                end_days = (policy.end_date - claim.occurrence_date).days
 
-        days_from_start = claim.days_from_policy_start
-        if days_from_start is None and policy.start_date:
-            days_from_start = (claim.occurrence_date - policy.start_date).days
+        best_points = 0
+        best_text: str | None = None
+        if start_days is not None:
+            if 0 <= start_days <= 10:
+                best_points = 8
+                best_text = f"{start_days} dias desde el inicio de la poliza"
+            elif 11 <= start_days <= 30:
+                best_points = 4
+                best_text = f"{start_days} dias desde el inicio de la poliza"
 
-        days_to_end = claim.days_from_policy_end
-        if days_to_end is None and policy.end_date:
-            days_to_end = (policy.end_date - claim.occurrence_date).days
+        if end_days is not None:
+            if 0 <= end_days <= 10 and 8 >= best_points:
+                best_points = 8
+                best_text = f"{end_days} dias para el fin de la poliza"
+            elif 11 <= end_days <= 30 and 4 > best_points:
+                best_points = 4
+                best_text = f"{end_days} dias para el fin de la poliza"
 
-        if days_from_start is not None and days_from_start < 0:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro antes del inicio de vigencia",
-                    description=f"Ocurrio {abs(days_from_start)} dias antes del inicio de la poliza.",
-                    points=30,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            )
-            return alerts
+        critical_yellow = any(
+            value is not None and 0 <= value < 2
+            for value in (start_days, end_days)
+        )
+        if best_points == 0 or not best_text:
+            return None, critical_yellow
 
-        if days_to_end is not None and days_to_end < 0:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro posterior al fin de vigencia",
-                    description=f"Ocurrio {abs(days_to_end)} dias despues del fin de la poliza.",
-                    points=30,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            )
-            return alerts
+        condition_code = "RP-001-A" if best_points == 8 else "RP-001-B"
+        return (
+            EvaluationAlert(
+                code="RP-001",
+                title="Reclamo cercano al borde de vigencia",
+                rule_name="Reclamo cercano al borde de vigencia",
+                category="Vigencia",
+                description=f"El siniestro se ubica en una ventana cercana a vigencia: {best_text}.",
+                points=best_points,
+                severity="amarillo" if best_points == 8 else "verde",
+                detected_value=best_text,
+                recommendation="",
+                condition_code=condition_code,
+            ),
+            critical_yellow,
+        )
 
-        if days_from_start is not None and 0 <= days_from_start <= 7:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro cerca del inicio de vigencia",
-                    description=f"Ocurrio {days_from_start} dias despues del inicio de la poliza.",
-                    points=18,
-                    severity=AlertSeverity.HIGH,
-                )
-            )
-        elif days_from_start is not None and 0 <= days_from_start <= 30:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro en ventana temprana de poliza",
-                    description=f"Ocurrio {days_from_start} dias despues del inicio de la poliza.",
-                    points=8,
-                    severity=AlertSeverity.MEDIUM,
-                )
-            )
-
-        if days_to_end is not None and 0 <= days_to_end <= 7:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro cerca del fin de vigencia",
-                    description=f"Ocurrio {days_to_end} dias antes del fin de la poliza.",
-                    points=14,
-                    severity=AlertSeverity.HIGH,
-                )
-            )
-        elif days_to_end is not None and 0 <= days_to_end <= 30:
-            alerts.append(
-                RuleAlert(
-                    code="RF-01",
-                    title="Siniestro en ventana final de poliza",
-                    description=f"Ocurrio {days_to_end} dias antes del fin de la poliza.",
-                    points=7,
-                    severity=AlertSeverity.MEDIUM,
-                )
-            )
-
-        return alerts
-
-    def _anomaly_alerts(self, context: RiskContext) -> list[RuleAlert]:
-        if context.amount_z_score is None or context.peer_claim_count < 5:
-            return []
-
-        if context.amount_z_score >= 3.5:
-            return [
-                RuleAlert(
-                    code="RF-09",
-                    title="Anomalia estadistica critica en monto",
-                    description=(
-                        "El monto reclamado esta muy por encima del comportamiento historico "
-                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
-                    ),
-                    points=24,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            ]
-        if context.amount_z_score >= 2.5:
-            return [
-                RuleAlert(
-                    code="RF-09",
-                    title="Anomalia estadistica en monto",
-                    description=(
-                        "El monto reclamado se aleja significativamente del comportamiento historico "
-                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
-                    ),
-                    points=16,
-                    severity=AlertSeverity.HIGH,
-                )
-            ]
-        if context.amount_z_score >= 2.0:
-            return [
-                RuleAlert(
-                    code="RF-09",
-                    title="Monto inusual por modelo estadistico",
-                    description=(
-                        "El monto reclamado supera el umbral de anomalia moderada "
-                        f"del ramo/cobertura (z-score {context.amount_z_score:.2f})."
-                    ),
-                    points=10,
-                    severity=AlertSeverity.MEDIUM,
-                )
-            ]
-
-        return []
-
-    def _report_delay_alerts(self, claim: Claim) -> list[RuleAlert]:
-        if not claim.occurrence_date or not claim.reported_date:
-            return []
-
+    def _report_delay_alert(self, claim: Claim) -> EvaluationAlert | None:
         delay = claim.report_delay_days
-        if delay is None:
+        if delay is None and claim.occurrence_date and claim.reported_date:
             delay = (claim.reported_date - claim.occurrence_date).days
+        if delay is None or delay <= 3:
+            return None
+        if delay > 7:
+            points = 5
+            condition_code = "RP-002-A"
+            severity = "amarillo"
+        else:
+            points = 3
+            condition_code = "RP-002-B"
+            severity = "verde"
+        return EvaluationAlert(
+            code="RP-002",
+            title="Reporte tardio",
+            rule_name="Reporte tardio",
+            category="Temporalidad",
+            description=f"El siniestro fue reportado {delay} dias despues de la ocurrencia.",
+            points=points,
+            severity=severity,
+            detected_value=str(delay),
+            recommendation="",
+            condition_code=condition_code,
+        )
 
-        if delay <= 3:
-            return []
+    def _frequency_alert(self, claim: Claim) -> EvaluationAlert | None:
+        history = int(claim.insured_claim_history or 0)
+        if history >= 3:
+            points = 8
+            severity = "amarillo"
+            condition_code = "RP-003-A"
+        elif history == 2:
+            points = 4
+            severity = "verde"
+            condition_code = "RP-003-B"
+        else:
+            return None
+        return EvaluationAlert(
+            code="RP-003",
+            title="Alta frecuencia asegurado",
+            rule_name="Alta frecuencia asegurado",
+            category="Comportamiento",
+            description=f"El asegurado registra {history} reclamos previos asociados al caso.",
+            points=points,
+            severity=severity,
+            detected_value=str(history),
+            recommendation="",
+            condition_code=condition_code,
+        )
 
-        description = normalize_text(claim.description or "")
-        is_theft = any(term in description for term in ("robo", "hurto", "sustraccion"))
-        if is_theft and delay >= 5:
-            return [
-                RuleAlert(
-                    code="RF-02",
-                    title="Denuncia tardia en caso de robo",
-                    description=f"El evento fue reportado {delay} dias despues de la ocurrencia.",
-                    points=14,
-                    severity=AlertSeverity.HIGH,
-                )
-            ]
-        if delay >= 10:
-            return [
-                RuleAlert(
-                    code="RF-02",
-                    title="Reporte tardio del siniestro",
-                    description=f"El evento fue reportado {delay} dias despues de la ocurrencia.",
-                    points=12,
-                    severity=AlertSeverity.HIGH,
-                )
-            ]
-        return [
-            RuleAlert(
-                code="RF-02",
-                title="Demora moderada en reporte",
-                description=f"El evento fue reportado {delay} dias despues de la ocurrencia.",
-                points=6,
-                severity=AlertSeverity.MEDIUM,
-            )
-        ]
-
-    def _frequency_alerts(self, context: RiskContext) -> list[RuleAlert]:
-        alerts: list[RuleAlert] = []
-        if context.insured_claim_count >= 4:
-            alerts.append(
-                RuleAlert(
-                    code="RF-03",
-                    title="Alta frecuencia de reclamos del asegurado",
-                    description=f"El asegurado registra {context.insured_claim_count} siniestros.",
-                    points=16,
-                    severity=AlertSeverity.HIGH,
-                )
-            )
-        elif context.insured_claim_count >= 3:
-            alerts.append(
-                RuleAlert(
-                    code="RF-03",
-                    title="Frecuencia inusual de reclamos del asegurado",
-                    description=f"El asegurado registra {context.insured_claim_count} siniestros.",
+    def _provider_alert(self, claim: Claim, provider: Provider | None) -> tuple[EvaluationAlert | None, bool]:
+        is_restricted = bool(claim.provider_list_restrictive or (provider and provider.is_restricted))
+        if is_restricted:
+            detected = provider.name if provider and provider.name else "Proveedor en lista restrictiva"
+            return (
+                EvaluationAlert(
+                    code="RP-004",
+                    title="Proveedor restringido",
+                    rule_name="Proveedor recurrente o restrictivo",
+                    category="Proveedor",
+                    description="El proveedor asociado aparece en lista restrictiva y requiere revision especializada.",
                     points=10,
-                    severity=AlertSeverity.MEDIUM,
-                )
+                    severity="critico",
+                    detected_value=detected,
+                    recommendation="",
+                    condition_code="RP-004-A",
+                ),
+                True,
             )
 
-        if context.vehicle_claim_count >= 3:
-            alerts.append(
-                RuleAlert(
-                    code="RF-03",
-                    title="Vehiculo con multiples reclamos",
-                    description=f"El vehiculo registra {context.vehicle_claim_count} siniestros.",
-                    points=14,
-                    severity=AlertSeverity.HIGH,
-                )
-            )
-        elif context.vehicle_claim_count >= 2:
-            alerts.append(
-                RuleAlert(
-                    code="RF-03",
-                    title="Vehiculo con reclamos repetidos",
-                    description=f"El vehiculo registra {context.vehicle_claim_count} siniestros.",
-                    points=8,
-                    severity=AlertSeverity.MEDIUM,
-                )
-            )
-
-        if context.driver_claim_count >= 3:
-            alerts.append(
-                RuleAlert(
-                    code="RF-03",
-                    title="Conductor con multiples reclamos",
-                    description=f"El conductor registra {context.driver_claim_count} siniestros.",
-                    points=12,
-                    severity=AlertSeverity.HIGH,
-                )
-            )
-
-        return alerts
-
-    def _provider_alerts(self, provider: Provider | None, context: RiskContext) -> list[RuleAlert]:
-        alerts: list[RuleAlert] = []
-        if provider and provider.is_restricted:
-            alerts.append(
-                RuleAlert(
-                    code="RF-04",
-                    title="Proveedor en lista restrictiva",
-                    description=f"El proveedor {provider.name or provider.id} esta marcado como restringido.",
-                    points=35,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            )
-
-        if context.provider_claim_count >= 4:
-            alerts.append(
-                RuleAlert(
-                    code="RF-04",
+        associated_claims = int(provider.associated_claims or 0) if provider else 0
+        if associated_claims > 2:
+            return (
+                EvaluationAlert(
+                    code="RP-004",
                     title="Proveedor recurrente",
-                    description=f"El proveedor aparece en {context.provider_claim_count} siniestros.",
-                    points=12,
-                    severity=AlertSeverity.MEDIUM,
-                )
+                    rule_name="Proveedor recurrente o restrictivo",
+                    category="Proveedor",
+                    description=f"El proveedor registra {associated_claims} reclamos asociados y amerita contraste adicional.",
+                    points=5,
+                    severity="amarillo",
+                    detected_value=str(associated_claims),
+                    recommendation="",
+                    condition_code="RP-004-B",
+                ),
+                False,
             )
+        return None, False
 
-        return alerts
+    def _documents_incomplete_alert(self, claim: Claim) -> EvaluationAlert | None:
+        if claim.documents_complete:
+            return None
+        return EvaluationAlert(
+            code="RP-005",
+            title="Documentos incompletos",
+            rule_name="Documentos incompletos",
+            category="Documentacion",
+            description="El expediente presenta documentos faltantes o pendientes de completitud.",
+            points=4,
+            severity="amarillo",
+            detected_value="false",
+            recommendation="",
+            condition_code="RP-005-A",
+        )
 
-    def _document_alerts(self, documents: list[ClaimDocument]) -> list[RuleAlert]:
-        problematic = [
-            document
-            for document in documents
-            if not document.delivered or not document.legible or document.inconsistency_detected
-        ]
+    def _narrative_alert(self, context: RiskContext) -> tuple[EvaluationAlert | None, int, bool]:
+        similarity = float(context.narrative_similarity or 0)
+        if similarity >= 0.85:
+            similar_text = (
+                f" frente al siniestro {context.similar_claim_code}"
+                if context.similar_claim_code
+                else ""
+            )
+            return (
+                EvaluationAlert(
+                    code="RP-006",
+                    title="Narrativa similar",
+                    rule_name="Narrativa similar",
+                    category="NLP",
+                    description=f"La narrativa presenta una similitud de {similarity:.2f}{similar_text}.",
+                    points=8,
+                    severity="amarillo",
+                    detected_value=f"{similarity:.2f}",
+                    recommendation="",
+                    condition_code="RP-006-A",
+                ),
+                8,
+                similarity >= 0.95,
+            )
+        if similarity >= 0.70:
+            return (
+                EvaluationAlert(
+                    code="RP-006",
+                    title="Narrativa parcialmente similar",
+                    rule_name="Narrativa similar",
+                    category="NLP",
+                    description=f"La narrativa presenta una similitud de {similarity:.2f} con otros casos comparables.",
+                    points=4,
+                    severity="verde",
+                    detected_value=f"{similarity:.2f}",
+                    recommendation="",
+                    condition_code="RP-006-B",
+                ),
+                4,
+                False,
+            )
+        return None, 0, False
+
+    def _insured_amount_alert(self, claim: Claim, policy: Policy | None) -> EvaluationAlert | None:
+        insured_amount = claim.insured_amount or (policy.insured_amount if policy else None)
+        if not insured_amount or not claim.claimed_amount:
+            return None
+        insured_decimal = Decimal(insured_amount)
+        if insured_decimal <= 0:
+            return None
+        ratio = Decimal(claim.claimed_amount) / insured_decimal
+        if ratio < Decimal("0.95"):
+            return None
+        return EvaluationAlert(
+            code="RP-007",
+            title="Monto cercano a suma asegurada",
+            rule_name="Monto cercano a suma asegurada",
+            category="Monto",
+            description=f"El monto reclamado representa {ratio:.0%} de la suma asegurada disponible.",
+            points=5,
+            severity="amarillo",
+            detected_value=f"{ratio:.4f}",
+            recommendation="",
+            condition_code="RP-007-A",
+        )
+
+    def _documents_inconsistent_alert(self, documents: list[ClaimDocument]) -> tuple[EvaluationAlert | None, bool]:
+        problematic = [document for document in documents if document.inconsistency_detected or not document.legible]
         if not problematic:
-            return []
+            return None, False
+        labels = ", ".join(document.document_type or document.code or document.id for document in problematic)
+        return (
+            EvaluationAlert(
+                code="RP-008",
+                title="Documentos inconsistentes",
+                rule_name="Documentos inconsistentes",
+                category="Documentacion",
+                description=f"Se detectaron documentos inconsistentes o ilegibles: {labels}.",
+                points=10,
+                severity="critico",
+                detected_value=labels,
+                recommendation="",
+                condition_code="RP-008-A",
+            ),
+            True,
+        )
 
-        points = min(8 * len(problematic), 24)
-        has_inconsistency = any(document.inconsistency_detected for document in problematic)
-        severity = AlertSeverity.HIGH if has_inconsistency else AlertSeverity.MEDIUM
-        if has_inconsistency and len(problematic) >= 2:
-            severity = AlertSeverity.CRITICAL
-            points = max(points, 28)
+    def _critical_coverage_alert(self, coverage: str | None) -> tuple[EvaluationAlert | None, bool]:
+        normalized = normalize_text(coverage or "")
+        is_critical = (
+            "ptxrb" in normalized
+            or ("perdida total" in normalized and ("robo" in normalized or "hurto" in normalized))
+        )
+        if not is_critical:
+            return None, False
+        return (
+            EvaluationAlert(
+                code="RP-009",
+                title="Cobertura critica por perdida total y robo",
+                rule_name="Cobertura critica por perdida total y robo",
+                category="Cobertura",
+                description="La cobertura declarada combina perdida total con robo y requiere revision especializada.",
+                points=10,
+                severity="critico",
+                detected_value=coverage,
+                recommendation="",
+                condition_code="RP-009-A",
+            ),
+            True,
+        )
 
-        labels = ", ".join(f"{document.document_type or document.id}: {document.status}" for document in problematic)
-        return [
-            RuleAlert(
-                code="RF-05",
-                title="Documentos incompletos o inconsistentes",
-                description=f"Se detectaron novedades documentales: {labels}.",
-                points=points,
-                severity=severity,
-            )
-        ]
-
-    def _narrative_alerts(self, context: RiskContext) -> list[RuleAlert]:
-        if not context.similar_claim_id:
-            return []
-
-        similarity_percent = round(context.narrative_similarity * 100)
-        if context.narrative_similarity >= 0.85:
-            return [
-                RuleAlert(
-                    code="RF-06",
-                    title="Narrativa posiblemente clonada",
-                    description=(
-                        f"La descripcion es {similarity_percent}% similar al siniestro "
-                        f"{context.similar_claim_id}."
-                    ),
-                    points=28,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            ]
-        if context.narrative_similarity >= 0.65:
-            return [
-                RuleAlert(
-                    code="RF-06",
-                    title="Narrativa similar a reclamo previo",
-                    description=(
-                        f"La descripcion es {similarity_percent}% similar al siniestro "
-                        f"{context.similar_claim_id}."
-                    ),
-                    points=14,
-                    severity=AlertSeverity.HIGH,
-                )
-            ]
-        return []
-
-    def _amount_alerts(self, claim: Claim, policy: Policy, context: RiskContext) -> list[RuleAlert]:
-        alerts: list[RuleAlert] = []
-        claimed_amount = claim.claimed_amount or Decimal("0")
-        insured_amount = policy.insured_amount or Decimal("0")
-        if insured_amount > 0:
-            ratio = claimed_amount / insured_amount
-            if ratio >= Decimal("0.95"):
-                alerts.append(
-                    RuleAlert(
-                        code="RF-07",
-                        title="Monto cercano a la suma asegurada",
-                        description=f"El monto reclamado representa {ratio:.0%} de la suma asegurada.",
-                        points=18,
-                        severity=AlertSeverity.HIGH,
-                    )
-                )
-            elif ratio >= Decimal("0.80"):
-                alerts.append(
-                    RuleAlert(
-                        code="RF-07",
-                        title="Monto alto frente a suma asegurada",
-                        description=f"El monto reclamado representa {ratio:.0%} de la suma asegurada.",
-                        points=10,
-                        severity=AlertSeverity.MEDIUM,
-                    )
-                )
-
-        if context.average_claimed_amount and context.average_claimed_amount > 0:
-            ratio_to_average = claimed_amount / context.average_claimed_amount
-            if ratio_to_average >= Decimal("2.50"):
-                alerts.append(
-                    RuleAlert(
-                        code="RF-07",
-                        title="Monto atipico frente al promedio",
-                        description=f"El monto es {ratio_to_average:.1f} veces el promedio del ramo/cobertura.",
-                        points=14,
-                        severity=AlertSeverity.HIGH,
-                    )
-                )
-
-        return alerts
-
-    def _dynamic_alerts(self, description: str) -> list[RuleAlert]:
-        normalized = normalize_text(description)
-        alerts: list[RuleAlert] = []
-
-        if "perdida total" in normalized and any(term in normalized for term in ("robo", "hurto")):
-            alerts.append(
-                RuleAlert(
-                    code="RF-08",
-                    title="Perdida total por robo",
-                    description="La descripcion combina perdida total con robo o hurto.",
-                    points=20,
-                    severity=AlertSeverity.CRITICAL,
-                )
-            )
-
-        matched_terms = [term for term in SUSPICIOUS_DYNAMIC_TERMS if term in normalized]
-        if len(matched_terms) >= 2:
-            alerts.append(
-                RuleAlert(
-                    code="RF-08",
-                    title="Dinamica del evento requiere revision",
-                    description=f"Terminos detectados en la narrativa: {', '.join(matched_terms)}.",
-                    points=10,
-                    severity=AlertSeverity.MEDIUM,
-                )
-            )
-
-        return alerts
-
-    def _build_explanation(self, score: int, level: RiskLevel, alerts: list[RuleAlert]) -> str:
+    def _build_explanation(
+        self,
+        level: RiskLevel,
+        alerts: list[EvaluationAlert],
+        context: RiskContext,
+        recommendation: str,
+    ) -> str:
         if not alerts:
             return (
-                f"Score {score}/100 ({level.value}). No se detectaron senales relevantes; "
-                "el caso puede continuar el flujo normal."
+                f"El siniestro fue clasificado como {level.value} porque no activo alertas relevantes "
+                "segun las reglas del MVP. Se recomienda mantener revision operativa normal. "
+                f"{ETHICAL_DISCLAIMER}"
             )
 
-        top_alerts = sorted(alerts, key=lambda item: item.points, reverse=True)[:3]
-        alert_text = "; ".join(f"{alert.title} (+{alert.points})" for alert in top_alerts)
+        ordered = sorted(alerts, key=lambda item: item.points, reverse=True)
+        drivers = "; ".join(
+            f"{alert.title} (+{alert.points})"
+            for alert in ordered[:4]
+        )
+        similarity_text = ""
+        if context.narrative_similarity >= 0.70:
+            similarity_text = f" La similitud narrativa observada fue {context.narrative_similarity:.2f}."
         return (
-            f"Score {score}/100 ({level.value}). El nivel se explica principalmente por: "
-            f"{alert_text}. Esta salida prioriza revision humana y no constituye una acusacion."
+            f"El siniestro fue clasificado como {level.value} porque activo las siguientes alertas: "
+            f"{drivers}.{similarity_text} Recomendacion: {recommendation} {ETHICAL_DISCLAIMER}"
         )

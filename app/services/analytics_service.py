@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from decimal import Decimal
 from datetime import date
 
@@ -8,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.domain import Claim
+from app.models.domain import Insured
+from app.models.domain import Policy
 from app.models.domain import Provider
 from app.models.domain import RiskAlert
 from app.models.domain import RiskAssessment
@@ -16,10 +20,12 @@ from app.schemas.analytics import AlertDashboardItem
 from app.schemas.analytics import AlertDashboardSummary
 from app.schemas.analytics import AlertRankingItem
 from app.schemas.analytics import BranchCountItem
+from app.schemas.analytics import CityCountItem
 from app.schemas.analytics import DashboardSummary
 from app.schemas.analytics import ProviderDashboardItem
 from app.schemas.analytics import ProviderDashboardSummary
 from app.schemas.analytics import ProviderRiskSummary
+from app.schemas.analytics import ReviewStatusItem
 from app.schemas.analytics import RiskDistributionItem
 from app.schemas.analytics import RiskLevelCountItem
 from app.schemas.analytics import TopIndicatorItem
@@ -31,12 +37,6 @@ class AnalyticsService:
         assessed_claims = int(db.scalar(select(func.count(RiskAssessment.id))) or 0)
         average_score = float(db.scalar(select(func.avg(RiskAssessment.score))) or 0)
         total_amount = Decimal(db.scalar(select(func.coalesce(func.sum(Claim.claimed_amount), 0))) or 0)
-        high_risk_cases = int(
-            db.scalar(
-                select(func.count(RiskAssessment.id)).where(RiskAssessment.level == RiskLevel.HIGH.value)
-            )
-            or 0
-        )
         high_risk_amount = Decimal(
             db.scalar(
                 select(func.coalesce(func.sum(Claim.claimed_amount), 0))
@@ -45,25 +45,19 @@ class AnalyticsService:
             )
             or 0
         )
-
-        today = date.today()
-        current_period_start = date(today.year, 1, 1)
-        current_period_end = date(today.year + 1, 1, 1)
-        active_claims_filter = self._active_claims_filter()
-        analysis_claims_filter = self._analysis_claims_filter()
-        queue_cases = int(
+        high_risk_cases = int(
             db.scalar(
-                select(func.count(Claim.id)).where(
-                    active_claims_filter,
-                    Claim.occurrence_date >= current_period_start,
-                    Claim.occurrence_date < current_period_end,
-                )
+                select(func.count(RiskAssessment.id)).where(RiskAssessment.level == RiskLevel.HIGH.value)
             )
+            or 0
+        )
+        queue_cases = int(
+            db.scalar(select(func.count(Claim.id)).where(self._active_claims_filter()))
             or 0
         )
         exposure_total = Decimal(
             db.scalar(
-                select(func.coalesce(func.sum(Claim.claimed_amount), 0)).where(analysis_claims_filter)
+                select(func.coalesce(func.sum(Claim.claimed_amount), 0)).where(self._analysis_claims_filter())
             )
             or 0
         )
@@ -71,9 +65,9 @@ class AnalyticsService:
         distribution_rows = db.execute(
             select(RiskAssessment.level, func.count(RiskAssessment.id)).group_by(RiskAssessment.level)
         ).all()
-        counts_by_level = {level: int(count) for level, count in distribution_rows}
+        counts_by_level = {str(level): int(count) for level, count in distribution_rows}
         distribution = [
-            RiskDistributionItem(level=level, count=counts_by_level.get(level, 0))
+            RiskDistributionItem(level=level, count=counts_by_level.get(level.value, 0))
             for level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH)
         ]
         risk_level_distribution = [
@@ -86,10 +80,7 @@ class AnalyticsService:
             .group_by(Claim.branch)
             .order_by(func.count(Claim.id).desc(), Claim.branch)
         ).all()
-        cases_by_branch = [
-            BranchCountItem(ramo=row.branch or "Sin ramo", count=int(row.count))
-            for row in branch_rows
-        ]
+        cases_by_branch = [BranchCountItem(ramo=row.branch or "Sin ramo", count=int(row.count)) for row in branch_rows]
 
         indicator_rows = db.execute(
             select(RiskAlert.code, func.count(RiskAlert.id).label("frequency"))
@@ -98,10 +89,7 @@ class AnalyticsService:
             .order_by(func.count(RiskAlert.id).desc(), RiskAlert.code)
             .limit(10)
         ).all()
-        top_indicators = [
-            TopIndicatorItem(codigo_regla=row.code, frecuencia=int(row.frequency))
-            for row in indicator_rows
-        ]
+        top_indicators = [TopIndicatorItem(codigo_regla=row.code, frecuencia=int(row.frequency)) for row in indicator_rows]
 
         return DashboardSummary(
             total_claims=total_claims,
@@ -128,14 +116,16 @@ class AnalyticsService:
                 Provider.provider_type,
                 Provider.is_restricted,
                 func.count(Claim.id).label("total_claims"),
+                func.count(RiskAlert.id).label("total_alerts"),
                 func.coalesce(func.avg(RiskAssessment.score), 0).label("average_score"),
                 func.coalesce(func.sum(Claim.claimed_amount), 0).label("total_amount"),
                 func.sum(case((RiskAssessment.level == RiskLevel.HIGH.value, 1), else_=0)).label("high_risk_claims"),
             )
             .join(Claim, Claim.provider_id == Provider.id)
             .outerjoin(RiskAssessment, RiskAssessment.claim_id == Claim.id)
+            .outerjoin(RiskAlert, RiskAlert.assessment_id == RiskAssessment.id)
             .group_by(Provider.id, Provider.code, Provider.name, Provider.provider_type, Provider.is_restricted)
-            .order_by(func.coalesce(func.avg(RiskAssessment.score), 0).desc(), func.count(Claim.id).desc())
+            .order_by(func.count(RiskAlert.id).desc(), func.coalesce(func.avg(RiskAssessment.score), 0).desc())
             .limit(limit)
         ).all()
 
@@ -145,10 +135,11 @@ class AnalyticsService:
                 provider_code=row.code,
                 provider_name=row.name or row.id,
                 provider_type=row.provider_type or "Otro",
-                total_claims=int(row.total_claims),
+                total_claims=int(row.total_claims or 0),
                 high_risk_claims=int(row.high_risk_claims or 0),
                 average_score=round(float(row.average_score or 0), 2),
                 total_claimed_amount=Decimal(row.total_amount or 0),
+                total_alerts=int(row.total_alerts or 0),
                 is_restricted=bool(row.is_restricted),
             )
             for row in rows
@@ -199,6 +190,7 @@ class AnalyticsService:
                     tipo=provider.provider_type,
                     casos_alto_riesgo=provider.high_risk_claims,
                     score_promedio=provider.average_score,
+                    total_alertas=provider.total_alerts,
                 )
                 for provider in ranking
             ],
@@ -208,12 +200,12 @@ class AnalyticsService:
         rows = db.execute(
             select(
                 RiskAlert.code,
-                RiskAlert.category,
+                func.min(RiskAlert.rule_name).label("title"),
                 RiskAlert.severity,
                 func.count(RiskAlert.id).label("occurrences"),
                 func.coalesce(func.sum(RiskAlert.points), 0).label("total_points"),
             )
-            .group_by(RiskAlert.code, RiskAlert.category, RiskAlert.severity)
+            .group_by(RiskAlert.code, RiskAlert.severity)
             .order_by(func.count(RiskAlert.id).desc(), func.coalesce(func.sum(RiskAlert.points), 0).desc())
             .limit(limit)
         ).all()
@@ -221,12 +213,13 @@ class AnalyticsService:
         return [
             AlertRankingItem(
                 code=row.code,
-                title=row.category or row.code,
-                severity=row.severity.value if hasattr(row.severity, "value") else str(row.severity),
-                occurrences=int(row.occurrences),
+                title=row.title or row.code,
+                severity=str(row.severity),
+                occurrences=int(row.occurrences or 0),
                 total_points=int(row.total_points or 0),
             )
             for row in rows
+            if row.code
         ]
 
     def alert_dashboard(self, db: Session, *, limit: int = 10) -> AlertDashboardSummary:
@@ -237,7 +230,7 @@ class AnalyticsService:
         rows = db.execute(
             select(
                 RiskAlert.code,
-                func.min(RiskAlert.category).label("indicator"),
+                func.min(RiskAlert.rule_name).label("indicator"),
                 func.count(RiskAlert.id).label("frequency"),
             )
             .where(RiskAlert.code.is_not(None))
@@ -255,27 +248,54 @@ class AnalyticsService:
                 AlertDashboardItem(
                     codigo_regla=row.code,
                     indicador=row.indicator or row.code,
-                    frecuencia=int(row.frequency),
+                    frecuencia=int(row.frequency or 0),
                 )
                 for row in rows
+                if row.code
             ],
         )
 
+    def review_status(self, db: Session) -> list[ReviewStatusItem]:
+        rows = db.execute(
+            select(Claim.flow_status, func.count(Claim.id))
+            .group_by(Claim.flow_status)
+            .order_by(func.count(Claim.id).desc(), Claim.flow_status)
+        ).all()
+        return [
+            ReviewStatusItem(estado_flujo=row.flow_status or "SIN_ESTADO", count=int(row[1] or 0))
+            for row in rows
+        ]
+
+    def branches(self, db: Session) -> list[BranchCountItem]:
+        rows = db.execute(
+            select(Claim.branch, func.count(Claim.id))
+            .group_by(Claim.branch)
+            .order_by(func.count(Claim.id).desc(), Claim.branch)
+        ).all()
+        return [BranchCountItem(ramo=row.branch or "Sin ramo", count=int(row[1] or 0)) for row in rows]
+
+    def cities(self, db: Session) -> list[CityCountItem]:
+        rows = db.execute(
+            select(func.coalesce(Insured.city, Policy.city).label("city"), func.count(Claim.id))
+            .join(Insured, Insured.id == Claim.insured_id)
+            .join(Policy, Policy.id == Claim.policy_id)
+            .group_by(func.coalesce(Insured.city, Policy.city))
+            .order_by(func.count(Claim.id).desc())
+        ).all()
+        return [CityCountItem(ciudad=row.city or "Sin ciudad", count=int(row[1] or 0)) for row in rows]
+
     def _active_claims_filter(self):
-        normalized_status = func.lower(func.coalesce(Claim.status, ""))
-        closed_statuses = {"anulado", "cancelado", "cerrado", "finalizado", "pagado", "rechazado"}
-        return or_(Claim.status.is_(None), normalized_status.notin_(closed_statuses))
+        normalized_status = func.lower(func.coalesce(Claim.flow_status, Claim.status, ""))
+        closed_statuses = {"cerrado", "rechazado", "pagado", "finalizado"}
+        return or_(Claim.flow_status.is_(None), normalized_status.notin_(closed_statuses))
 
     def _analysis_claims_filter(self):
-        normalized_status = func.lower(func.coalesce(Claim.status, ""))
+        normalized_status = func.lower(func.coalesce(Claim.flow_status, Claim.status, ""))
         analysis_statuses = {
-            "abierto",
-            "analisis",
-            "en analisis",
-            "en revision",
+            "pending_review",
+            "en_revision",
+            "escalated_antifraud",
             "observado",
             "pendiente",
-            "reserva",
-            "revision",
         }
-        return or_(Claim.status.is_(None), normalized_status.in_(analysis_statuses))
+        return or_(Claim.flow_status.is_(None), normalized_status.in_(analysis_statuses))

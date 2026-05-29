@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from decimal import Decimal
 
 DB_PATH = Path(__file__).with_name("test_antifraude.db")
 if DB_PATH.exists():
@@ -12,25 +13,24 @@ os.environ["OLLAMA_ENABLED"] = "false"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.db.session import engine  # noqa: E402
+from app.db.base import Base  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
+from app.db.session import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.domain import ChatMessage  # noqa: E402
 from app.schemas.imports import DataImportPayload  # noqa: E402
-from app.services.ollama_client import OllamaClient  # noqa: E402
-from app.services.file_import_service import FileImportService  # noqa: E402
 from app.services.import_service import ImportService  # noqa: E402
+from app.services.risk_engine import RiskContext  # noqa: E402
+from app.services.risk_engine import RiskEngine  # noqa: E402
 
 INSURED_ID = "00000000-0000-0000-0000-000000000101"
 POLICY_ID = "10000000-0000-0000-0000-000000000101"
 PROVIDER_ID = "20000000-0000-0000-0000-000000000101"
 VEHICLE_ID = "30000000-0000-0000-0000-000000000101"
 CLAIM_ID = "50000000-0000-0000-0000-000000000101"
-DOCUMENT_ID = "60000000-0000-0000-0000-000000000101"
+CLAIM_CODE = "SIN-1042"
 INSURED_CODE = "ASE-0101"
 POLICY_CODE = "POL-0101"
 PROVIDER_CODE = "PRO-0101"
-CLAIM_CODE = "SIN-1042"
 
 
 def teardown_module() -> None:
@@ -45,13 +45,14 @@ def base_payload() -> dict:
             {
                 "id": INSURED_ID,
                 "code": INSURED_CODE,
+                "name": "Juan Perez",
                 "segment": "VIP",
+                "seniority_years": 2,
                 "seniority_months": 24,
                 "city": "Quito",
                 "policy_count": 1,
-                "claims_12m": 0,
-                "current_delinquency": False,
-                "client_score": "82.50",
+                "claims_12m": 1,
+                "historical_claims_total": 3,
             }
         ],
         "providers": [
@@ -61,9 +62,9 @@ def base_payload() -> dict:
                 "name": "Taller Observado",
                 "provider_type": "Taller",
                 "city": "Quito",
-                "associated_claims": 4,
-                "observed_cases_pct": "70",
+                "associated_claims": 5,
                 "is_restricted": True,
+                "restriction_reason": "Patrones recurrentes",
             }
         ],
         "policies": [
@@ -76,7 +77,6 @@ def base_payload() -> dict:
                 "end_date": "2026-12-31",
                 "premium_amount": "900",
                 "insured_amount": "25000",
-                "deductible": "500",
                 "sales_channel": "Digital",
                 "city": "Quito",
                 "status": "Vigente",
@@ -85,6 +85,7 @@ def base_payload() -> dict:
         "vehicles": [
             {
                 "id": VEHICLE_ID,
+                "code": "PBA-1201",
                 "policy_id": POLICY_ID,
                 "plate": "PBA-1201",
                 "brand": "Kia",
@@ -94,10 +95,12 @@ def base_payload() -> dict:
             }
         ],
         "claims": [],
+        "documents": [],
     }
 
 
 def import_test_payload(payload: dict, *, reset: bool = True) -> dict[str, int]:
+    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         return ImportService().import_payload(db, DataImportPayload(**payload), reset=reset)
@@ -105,7 +108,7 @@ def import_test_payload(payload: dict, *, reset: bool = True) -> dict[str, int]:
         db.close()
 
 
-def test_import_service_and_top_risk_cases() -> None:
+def claim_payload() -> dict:
     payload = base_payload()
     payload["claims"] = [
         {
@@ -115,17 +118,26 @@ def test_import_service_and_top_risk_cases() -> None:
             "insured_id": INSURED_ID,
             "provider_id": PROVIDER_ID,
             "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
+            "coverage": "Perdida Total por Robo",
+            "occurrence_date": "2026-01-02",
             "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
+            "claimed_amount": "24500",
             "estimated_amount": "24500",
             "status": "Reserva",
             "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos y con llaves dentro.",
+            "description": "Robo total del vehiculo durante la madrugada sin testigos.",
+            "documents_complete": False,
+            "provider_list_restrictive": True,
+            "days_from_policy_start": 1,
+            "days_from_policy_end": 363,
+            "report_delay_days": 8,
+            "insured_claim_history": 3,
+            "insured_amount": "25000",
+            "max_narrative_similarity": "0.96",
             "documents": [
                 {
                     "id": "60000000-0000-0000-0000-000000000101",
+                    "code": "DOC-0101",
                     "document_type": "Denuncia",
                     "delivered": True,
                     "legible": True,
@@ -133,652 +145,306 @@ def test_import_service_and_top_risk_cases() -> None:
                 },
                 {
                     "id": "60000000-0000-0000-0000-000000000102",
+                    "code": "DOC-0102",
                     "document_type": "Factura",
                     "delivered": True,
-                    "legible": True,
+                    "legible": False,
                     "inconsistency_detected": True,
                 },
             ],
         }
     ]
+    return payload
+
+
+def test_risk_engine_applies_critical_red_override() -> None:
+    payload = claim_payload()
+    import_test_payload(payload)
 
     with TestClient(app) as client:
-        imported = import_test_payload(payload)
-        assert imported["claims"] == 1
-        assert imported["assessments"] == 1
+        response = client.get(f"/api/claims/{CLAIM_CODE}")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assessment = data["risk_assessment"]
+        assert float(assessment["score"]) >= 85
+        assert assessment["level"] == "rojo"
+        assert any(alert["code"] == "RP-004" for alert in assessment["alerts"])
+        assert any(alert["code"] == "RP-008" for alert in assessment["alerts"])
+        assert "revision humana" in assessment["ethical_disclaimer"].lower()
 
-        top = client.get("/api/risk/top?limit=1")
-        assert top.status_code == 200
-        claim = top.json()["data"][0]
-        assert set(claim) == {"code", "ramo", "score", "nivel_riesgo", "fecha_ocurrencia", "monto_reclamado"}
-        assert claim["code"] == CLAIM_CODE
-        assert float(claim["score"]) >= 76
-        assert claim["nivel_riesgo"] == "rojo"
 
-        listed = client.get("/api/claims?limit=10")
+def test_health_endpoints_report_api_and_db_status() -> None:
+    with TestClient(app) as client:
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        health_data = health.json()["data"]
+        assert health_data["status"] == "ok"
+        assert health_data["database_health_url"] == "/api/health/db"
+
+        db_health = client.get("/api/health/db")
+        assert db_health.status_code == 200
+        db_data = db_health.json()["data"]
+        assert db_data["connected"] is True
+        assert db_data["database_backend"] == "sqlite"
+        assert isinstance(db_data["latency_ms"], (int, float))
+
+
+def test_claim_endpoints_expose_detail_alerts_and_assessment() -> None:
+    import_test_payload(claim_payload())
+
+    with TestClient(app) as client:
+        listed = client.get("/api/claims?page=1&limit=10")
         assert listed.status_code == 200
-        listed_claim = listed.json()["data"]["items"][0]
-        assert listed_claim["code"] == CLAIM_CODE
-        assert "documents" not in listed_claim
-        assert "risk_assessment" not in listed_claim
+        item = listed.json()["data"]["items"][0]
+        assert item["code"] == CLAIM_CODE
+        assert item["nivel_riesgo"] == "rojo"
+        assert item["total_alertas"] >= 1
+        assert item["estado_flujo"] is None
 
         detail = client.get(f"/api/claims/{CLAIM_CODE}")
         assert detail.status_code == 200
         detail_data = detail.json()["data"]
         assert detail_data["code"] == CLAIM_CODE
-        assert "id" not in detail_data
-        assert "policy_id" not in detail_data
-        assert "insured_id" not in detail_data
-        assert "provider_id" not in detail_data
-        assert detail_data["insured"]["code"] == INSURED_CODE
         assert detail_data["policy"]["code"] == POLICY_CODE
+        assert detail_data["insured"]["code"] == INSURED_CODE
         assert detail_data["provider"]["code"] == PROVIDER_CODE
-        assert "id" not in detail_data["insured"]
-        assert "id" not in detail_data["policy"]
-        assert "id" not in detail_data["provider"]
+        assert detail_data["vehicle"]["plate"] == "PBA-1201"
+        assert detail_data["score"]["level"] == "rojo"
+        assert detail_data["alerts"]
+
+        alerts = client.get(f"/api/claims/{CLAIM_CODE}/alerts")
+        assert alerts.status_code == 200
+        assert alerts.json()["data"]["items"]
+
+        assessment = client.get(f"/api/claims/{CLAIM_CODE}/assessment")
+        assert assessment.status_code == 200
+        assert assessment.json()["data"]["assessment"]["score"] == detail_data["score"]["score"]
+
+        recalculated = client.post(
+            f"/api/claims/{CLAIM_CODE}/assess",
+            json={"include_ai_model": True, "include_nlp": True, "force_recalculate": True},
+        )
+        assert recalculated.status_code == 200
+        recalc_data = recalculated.json()["data"]
+        assert recalc_data["level"] == "rojo"
+        assert recalc_data["recommendation"]
+        assert recalc_data["ethical_disclaimer"]
 
 
-def test_assess_claim_by_code_returns_light_payload_without_embeddings(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "ollama_enabled", True)
-    monkeypatch.setattr(settings, "ollama_embeddings_enabled", True)
-
-    def fail_if_called(self, text: str) -> list[float] | None:
-        raise AssertionError("Ollama embeddings should be opt-in for single claim assessment")
-
-    monkeypatch.setattr(OllamaClient, "embed", fail_if_called)
-    payload = base_payload()
-    payload["claims"] = [
-        {
-            "id": CLAIM_ID,
-            "code": CLAIM_CODE,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
-            "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
-            "estimated_amount": "24500",
-            "status": "Reserva",
-            "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos y con llaves dentro.",
-            "documents": [
-                {
-                    "id": "60000000-0000-0000-0000-000000000101",
-                    "document_type": "Denuncia",
-                    "delivered": True,
-                    "legible": True,
-                    "inconsistency_detected": False,
-                },
-                {
-                    "id": "60000000-0000-0000-0000-000000000102",
-                    "document_type": "Factura",
-                    "delivered": True,
-                    "legible": True,
-                    "inconsistency_detected": True,
-                },
-            ],
-        }
-    ]
-
-    with TestClient(app) as client:
-        import_test_payload(payload)
-
-        response = client.post(f"/api/claims/{CLAIM_CODE}/assess")
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert set(data) == {
-            "score",
-            "level",
-            "suggested_action",
-            "explanation",
-            "model_version",
-            "reviewed_by_analyst",
-            "calculated_at",
-            "alerts",
-        }
-        assert "id" not in data
-        assert "claim_id" not in data
-        assert "signal_detail" not in data
-        assert data["alerts"]
-        assert set(data["alerts"][0]) == {
-            "code",
-            "title",
-            "category",
-            "description",
-            "points",
-            "severity",
-            "recommendation",
-        }
-
-
-def test_csv_file_import_for_claims() -> None:
+def test_file_import_tracks_batch_errors_and_assessment() -> None:
+    import_test_payload(base_payload())
     csv_content = (
-        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,"
-        "fecha_reporte,monto_reclamado,monto_estimado,estado,sucursal,descripcion\n"
-        f"{CLAIM_ID},{POLICY_ID},{INSURED_ID},{PROVIDER_ID},Vehiculos,Robo,2026-01-03,"
-        "2026-01-10,24000,24500,Reserva,Quito Norte,"
-        "Robo total del vehiculo durante madrugada sin testigos\n"
+        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,fecha_reporte,"
+        "monto_reclamado,estado,sucursal,descripcion_del_evento,docs_completos,prov_lista_restrictiva,"
+        "dias_desde_inicio_poliza,dias_hasta_fin_poliza,dias_ocurr_reporte,n_reclamos_previos_asegurado,"
+        "suma_asegurada,similitud_narrativa_max\n"
+        f"SIN-2001,{POLICY_CODE},{INSURED_CODE},{PROVIDER_CODE},Vehiculos,Robo,2026-01-03,2026-01-10,"
+        "20000,Reserva,Quito Norte,Evento valido,no,si,2,300,7,2,25000,0.80\n"
+        f"SIN-2002,{POLICY_CODE},{INSURED_CODE},{PROVIDER_CODE},Vehiculos,Robo,2026-01-10,2026-01-03,"
+        "21000,Reserva,Quito Norte,Evento invalido,no,si,2,300,7,2,25000,0.80\n"
     )
 
     with TestClient(app) as client:
-        import_test_payload(base_payload())
+        imported = client.post("/api/imports/file", files={"file": ("siniestros.csv", csv_content, "text/csv")})
+        assert imported.status_code == 200
+        payload = imported.json()["data"]
+        assert payload["summary"]["created_claims"] == 1
+        assert payload["summary"]["errors"] == 1
+        import_id = payload["import_id"]
 
-        response = client.post(
-            "/api/imports/file?dataset=siniestros",
-            files={"file": ("siniestros.csv", csv_content, "text/csv")},
+        imports = client.get("/api/imports")
+        assert imports.status_code == 200
+        listed = imports.json()["data"]["items"][0]
+        assert listed["id"] == import_id
+        assert listed["status"] == "PARTIAL"
+        assert "Tiempos:" in listed["result_message"]
+
+        errors = client.get(f"/api/imports/{import_id}/errors")
+        assert errors.status_code == 200
+        assert len(errors.json()["data"]) == 1
+        assert "fecha_reporte" in errors.json()["data"][0]["message"]
+
+        assessed = client.post(
+            f"/api/imports/{import_id}/assess",
+            json={"include_ai_model": True, "include_nlp": True, "force_recalculate": True},
         )
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["data"]["filename"] == "siniestros.csv"
-        assert payload["data"]["datasets"]["claims"] == 1
-        assert payload["data"]["claims"] == 1
-        assert payload["data"]["assessments"] == 1
+        assert assessed.status_code == 200
+        assert assessed.json()["data"]["summary"]["processed"] == 1
 
 
-def test_csv_file_import_infers_dataset_from_filename_without_query() -> None:
+def test_file_import_exposes_failed_limit_rejections_in_import_history() -> None:
+    import_test_payload(base_payload())
+    original_limit = settings.import_max_rows
+    settings.import_max_rows = 1
     csv_content = (
-        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,"
-        "fecha_reporte,monto_reclamado,monto_estimado,estado,sucursal,descripcion\n"
-        f"{CLAIM_ID},{POLICY_ID},{INSURED_ID},{PROVIDER_ID},Vehiculos,Robo,2026-01-03,"
-        "2026-01-10,24000,24500,Reserva,Quito Norte,"
-        "Robo total del vehiculo durante madrugada sin testigos\n"
+        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,fecha_reporte,"
+        "monto_reclamado,estado,sucursal,descripcion_del_evento,docs_completos,prov_lista_restrictiva,"
+        "dias_desde_inicio_poliza,dias_hasta_fin_poliza,dias_ocurr_reporte,n_reclamos_previos_asegurado,"
+        "suma_asegurada,similitud_narrativa_max\n"
+        f"SIN-3001,{POLICY_CODE},{INSURED_CODE},{PROVIDER_CODE},Vehiculos,Robo,2026-01-03,2026-01-10,"
+        "20000,Reserva,Quito Norte,Evento valido,no,si,2,300,7,2,25000,0.80\n"
+        f"SIN-3002,{POLICY_CODE},{INSURED_CODE},{PROVIDER_CODE},Vehiculos,Robo,2026-01-04,2026-01-11,"
+        "21000,Reserva,Quito Norte,Segundo evento,no,si,2,300,7,2,25000,0.82\n"
     )
 
-    with TestClient(app) as client:
-        import_test_payload(base_payload())
-
-        response = client.post(
-            "/api/imports/file",
-            files={"file": ("siniestros.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["data"]["datasets"]["claims"] == 1
-        assert payload["data"]["claims"] == 1
-
-
-def test_csv_file_import_infers_dataset_from_headers_for_generic_filename() -> None:
-    csv_content = (
-        "id_vehiculo,id_poliza,placa,chasis,motor,marca,modelo,anio,color\n"
-        f"{VEHICLE_ID},{POLICY_ID},PBA-1201,CHASIS1,MOTOR1,Kia,Sportage,2022,Blanco\n"
-    )
-
-    with TestClient(app) as client:
-        import_test_payload(base_payload())
-
-        response = client.post(
-            "/api/imports/file",
-            files={"file": ("carga_drag_drop.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["data"]["datasets"]["vehicles"] == 1
-        assert payload["data"]["vehicles"] == 1
-
-
-def test_csv_file_import_many_claims_skips_ollama_embeddings(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "ollama_enabled", True)
-    monkeypatch.setattr(settings, "ollama_embeddings_enabled", True)
-
-    def fail_if_called(self, text: str) -> list[float] | None:
-        raise AssertionError("Ollama embeddings should not be used during file imports")
-
-    monkeypatch.setattr(OllamaClient, "embed", fail_if_called)
-    rows = [
-        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,"
-        "fecha_reporte,monto_reclamado,monto_estimado,estado,sucursal,descripcion"
-    ]
-    for index in range(120):
-        claim_id = f"50000000-0000-0000-0000-{index + 200:012d}"
-        rows.append(
-            f"{claim_id},{POLICY_ID},{INSURED_ID},{PROVIDER_ID},Vehiculos,Robo,2026-01-03,"
-            "2026-01-10,24000,24500,Reserva,Quito Norte,"
-            f"Robo total del vehiculo durante madrugada sin testigos caso {index}"
-        )
-    csv_content = "\n".join(rows) + "\n"
-
-    with TestClient(app) as client:
-        import_test_payload(base_payload())
-
-        response = client.post(
-            "/api/imports/file?dataset=siniestros",
-            files={"file": ("siniestros.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["data"]["claims"] == 120
-        assert payload["data"]["assessments"] == 120
-
-
-def test_csv_file_import_for_documents_with_claim_id_column() -> None:
-    payload = base_payload()
-    payload["claims"] = [
-        {
-            "id": CLAIM_ID,
-            "code": CLAIM_CODE,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
-            "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
-            "status": "Reserva",
-            "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos.",
-            "documents": [],
-        }
-    ]
-    csv_content = (
-        "id_documento,id_siniestro,tipo_documento,entregado,legible,fecha_emision,"
-        "inconsistencia_detectada,observacion\n"
-        f"{DOCUMENT_ID},{CLAIM_ID},Denuncia,si,si,2026-01-04,no,Documento correcto\n"
-    )
-
-    with TestClient(app) as client:
-        import_test_payload(payload)
-
-        response = client.post(
-            "/api/imports/file?dataset=documentos",
-            files={"file": ("documentos.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["data"]["datasets"]["documents"] == 1
-        assert payload["data"]["claims"] == 0
-        assert payload["data"]["assessments"] == 1
-
-        claim = client.get(f"/api/claims/{CLAIM_ID}")
-        assert claim.status_code == 200
-        documents = claim.json()["data"]["documents"]
-        assert len(documents) == 1
-        assert documents[0]["document_type"] == "Denuncia"
-        assert "id" not in documents[0]
-        assert "claim_id" not in documents[0]
-
-
-def test_csv_file_import_rejects_mismatched_filename_and_dataset() -> None:
-    csv_content = (
-        "id_vehiculo,id_poliza,placa,chasis,motor,marca,modelo,anio,color\n"
-        f"{VEHICLE_ID},{POLICY_ID},PBA-1201,CHASIS1,MOTOR1,Kia,Sportage,2022,Blanco\n"
-    )
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/imports/file?dataset=asegurados",
-            files={"file": ("vehiculos.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        assert response.json()["success"] is False
-        assert response.json()["error"]["code"] == "HTTP_422"
-        assert "corresponde a vehiculos" in response.json()["error"]["message"]
-
-
-def test_csv_file_import_rejects_document_filename_with_vehicle_dataset() -> None:
-    csv_content = (
-        "id_documento,id_siniestro,tipo_documento,entregado,legible\n"
-        f"{DOCUMENT_ID},{CLAIM_ID},Denuncia,si,si\n"
-    )
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/imports/file?dataset=vehiculos",
-            files={"file": ("documentos.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        detail = response.json()["error"]["message"]
-        assert "corresponde a documentos" in detail
-        assert "dataset=vehiculos" in detail
-
-
-def test_csv_file_import_rejects_columns_from_other_dataset() -> None:
-    csv_content = (
-        "id_vehiculo,id_poliza,placa,chasis,motor,marca,modelo,anio,color\n"
-        f"{VEHICLE_ID},{POLICY_ID},PBA-1201,CHASIS1,MOTOR1,Kia,Sportage,2022,Blanco\n"
-    )
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/imports/file?dataset=asegurados",
-            files={"file": ("carga_generica.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        assert response.json()["success"] is False
-        detail = response.json()["error"]["message"]
-        assert "columnas no corresponden al dataset asegurados" in detail
-        assert "Faltan obligatorias: id_asegurado" in detail
-
-
-def test_csv_file_import_rejects_ambiguous_headers_without_dataset() -> None:
-    csv_content = f"id\n{INSURED_ID}\n"
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/imports/file",
-            files={"file": ("carga_generica.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        detail = response.json()["error"]["message"]
-        assert "columnas ambiguas" in detail
-        assert "dataset automaticamente" in detail
-
-
-def test_csv_header_validation_accepts_required_columns_for_each_dataset() -> None:
-    service = FileImportService()
-    cases = [
-        ("asegurados.csv", "asegurados", f"id_asegurado\n{INSURED_ID}\n"),
-        ("proveedores.csv", "proveedores", f"id_proveedor\n{PROVIDER_ID}\n"),
-        (
-            "polizas.csv",
-            "polizas",
-            "id_poliza,id_asegurado,ramo,fecha_inicio,fecha_fin\n"
-            f"{POLICY_ID},{INSURED_ID},Vehiculos,2026-01-01,2026-12-31\n",
-        ),
-        ("vehiculos.csv", "vehiculos", f"id_vehiculo,id_poliza\n{VEHICLE_ID},{POLICY_ID}\n"),
-        (
-            "siniestros.csv",
-            "siniestros",
-            f"id_siniestro,id_poliza,id_asegurado\n{CLAIM_ID},{POLICY_ID},{INSURED_ID}\n",
-        ),
-        (
-            "documentos.csv",
-            "documentos",
-            f"id_documento,id_siniestro\n{DOCUMENT_ID},{CLAIM_ID}\n",
-        ),
-    ]
-
-    for filename, dataset, csv_content in cases:
-        rows_by_dataset = service._read_csv(csv_content.encode(), filename=filename, dataset=dataset)
-        assert sum(len(rows) for rows in rows_by_dataset.values()) == 1
-
-
-def test_csv_file_import_rejects_files_over_row_limit(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "import_max_rows", 1)
-    csv_content = (
-        "id_asegurado,segmento\n"
-        f"{INSURED_ID},VIP\n"
-        "00000000-0000-0000-0000-000000000102,Masivo\n"
-    )
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/imports/file?dataset=asegurados",
-            files={"file": ("asegurados.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        detail = response.json()["error"]["message"]
-        assert "supera el limite configurado de 1" in detail
-
-
-def test_csv_file_import_rejects_invalid_claim_dates() -> None:
-    csv_content = (
-        "id_siniestro,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,"
-        "fecha_reporte,monto_reclamado,estado\n"
-        f"{CLAIM_ID},{POLICY_ID},{INSURED_ID},{PROVIDER_ID},Vehiculos,Robo,2026-01-10,"
-        "2026-01-03,24000,Reserva\n"
-    )
-
-    with TestClient(app) as client:
-        import_test_payload(base_payload())
-
-        response = client.post(
-            "/api/imports/file?dataset=siniestros",
-            files={"file": ("siniestros.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        detail = response.json()["error"]["message"]
-        assert "fecha_reporte no puede ser anterior a fecha_ocurrencia" in detail
-
-
-def test_csv_file_import_rejects_duplicate_codes_in_batch() -> None:
-    csv_content = (
-        "id_siniestro,code,id_poliza,id_asegurado,id_proveedor,ramo,cobertura,fecha_ocurrencia,"
-        "fecha_reporte,monto_reclamado,estado\n"
-        f"{CLAIM_ID},SIN-DUP,{POLICY_ID},{INSURED_ID},{PROVIDER_ID},Vehiculos,Robo,2026-01-03,"
-        "2026-01-10,24000,Reserva\n"
-        f"50000000-0000-0000-0000-000000000202,SIN-DUP,{POLICY_ID},{INSURED_ID},{PROVIDER_ID},"
-        "Vehiculos,Robo,2026-01-04,2026-01-10,25000,Reserva\n"
-    )
-
-    with TestClient(app) as client:
-        import_test_payload(base_payload())
-
-        response = client.post(
-            "/api/imports/file?dataset=siniestros",
-            files={"file": ("siniestros.csv", csv_content, "text/csv")},
-        )
-
-        assert response.status_code == 422
-        assert "Codigo duplicado" in response.json()["error"]["message"]
-
-
-def test_agent_explains_claim_without_llm() -> None:
-    payload = base_payload()
-    payload["claims"] = [
-        {
-            "id": CLAIM_ID,
-            "code": CLAIM_CODE,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
-            "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
-            "status": "Reserva",
-            "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos.",
-            "documents": [],
-        }
-    ]
-
-    with TestClient(app) as client:
-        import_test_payload(payload)
-
-        response = client.post(
-            "/api/agent/query",
-            json={
-                "question": "Por que este siniestro fue marcado como alto riesgo?",
-                "claim_id": CLAIM_CODE,
-            },
-        )
-
-        assert response.status_code == 200
-        response_payload = response.json()
-        assert response_payload["success"] is True
-        assert response_payload["data"]["used_llm"] is False
-        assert response_payload["data"]["claim_id"] == CLAIM_ID
-        assert CLAIM_CODE in response_payload["data"]["answer"]
-
-
-def test_agent_keeps_claim_session_history() -> None:
-    payload = base_payload()
-    payload["claims"] = [
-        {
-            "id": CLAIM_ID,
-            "code": CLAIM_CODE,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
-            "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
-            "status": "Reserva",
-            "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos.",
-            "documents": [],
-        }
-    ]
-
-    with TestClient(app) as client:
-        import_test_payload(payload)
-
-        first_response = client.post(
-            "/api/agent/query",
-            json={
-                "question": "Explicame el riesgo de este siniestro",
-                "claim_id": CLAIM_ID,
-            },
-        )
-        assert first_response.status_code == 200
-        session_id = first_response.json()["data"]["session_id"]
-        assert session_id
-
-        second_response = client.post(
-            "/api/agent/query",
-            json={
-                "question": "Y que debo revisar primero?",
-                "session_id": session_id,
-            },
-        )
-
-        assert second_response.status_code == 200
-        second_payload = second_response.json()["data"]
-        assert second_payload["session_id"] == session_id
-        assert second_payload["claim_id"] == CLAIM_ID
-        assert CLAIM_CODE in second_payload["answer"]
-
-    db = SessionLocal()
     try:
-        message_count = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).count()
-        assert message_count == 4
+        with TestClient(app) as client:
+            imported = client.post("/api/imports/file", files={"file": ("siniestros.csv", csv_content, "text/csv")})
+            assert imported.status_code == 422
+            assert "supera el limite configurado" in imported.json()["error"]["message"]
+
+            imports = client.get("/api/imports")
+            assert imports.status_code == 200
+            listed = imports.json()["data"]["items"][0]
+            assert listed["status"] == "FAILED"
+            assert listed["total_rows"] == 2
+            assert listed["valid_rows"] == 0
+            assert listed["invalid_rows"] == 2
+            assert listed["summary"]["errors"] == 2
+            assert "supera el limite configurado" in listed["result_message"]
+
+            errors = client.get(f"/api/imports/{listed['id']}/errors")
+            assert errors.status_code == 200
+            assert len(errors.json()["data"]) == 1
+            assert "supera el limite configurado" in errors.json()["data"][0]["message"]
     finally:
-        db.close()
+        settings.import_max_rows = original_limit
 
 
-def test_statistical_amount_anomaly_adds_rule_alert() -> None:
-    payload = base_payload()
-    payload["policies"][0]["insured_amount"] = "100000"
-    baseline_amounts = ["1000", "1100", "900", "1050", "950", "1200"]
-    payload["claims"] = [
-        {
-            "id": f"50000000-0000-0000-0000-{index + 300:012d}",
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Choque",
-            "occurrence_date": f"2026-02-{index + 1:02d}",
-            "reported_date": f"2026-02-{index + 2:02d}",
-            "claimed_amount": amount,
-            "status": "Reserva",
-            "description": f"Golpe menor caso base {index}",
-            "documents": [],
-        }
-        for index, amount in enumerate(baseline_amounts)
-    ]
-    payload["claims"].append(
-        {
-            "id": CLAIM_ID,
-            "code": CLAIM_CODE,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Choque",
-            "occurrence_date": "2026-02-20",
-            "reported_date": "2026-02-21",
-            "claimed_amount": "5000",
-            "status": "Reserva",
-            "description": "Golpe menor con monto muy superior al historico comparable",
-            "documents": [],
-        }
-    )
+def test_rules_endpoint_exposes_real_rule_fields_for_transparency() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/rules")
+        assert response.status_code == 200
+        rule = response.json()["data"][0]
+        assert "severity" not in rule
+        assert "max_score" in rule
+        assert "rule_type" in rule
+        assert rule["conditions"]
+
+        condition = rule["conditions"][0]
+        assert "code" not in condition
+        assert "threshold_value" not in condition
+        assert "severity" not in condition
+        assert "field_name" in condition
+        assert "value_min" in condition
+        assert "value_max" in condition
+        assert "value_text" in condition
+        assert "result_description" in condition
+
+
+def test_catalogs_review_history_and_flow_update() -> None:
+    import_test_payload(claim_payload())
 
     with TestClient(app) as client:
-        import_test_payload(payload)
+        decisions = client.get("/api/catalogs/decisions")
+        statuses = client.get("/api/catalogs/claim-statuses")
+        assert decisions.status_code == 200
+        assert statuses.status_code == 200
+        assert decisions.json()["data"]
+        assert statuses.json()["data"]
+
+        review = client.post(
+            f"/api/claims/{CLAIM_CODE}/review",
+            json={
+                "decision": "ESCALATE_ANTIFRAUD",
+                "estado_resultante": "ESCALATED_ANTIFRAUD",
+                "comentario": "Requiere revision especializada",
+            },
+        )
+        assert review.status_code == 200
+        review_data = review.json()["data"]
+        assert review_data["review"]["decision_code"] == "ESCALATE_ANTIFRAUD"
+        assert review_data["review_summary"]["current_flow_status"] == "ESCALATED_ANTIFRAUD"
+
+        history = client.get(f"/api/claims/{CLAIM_CODE}/review-history")
+        assert history.status_code == 200
+        assert len(history.json()["data"]) == 1
 
         detail = client.get(f"/api/claims/{CLAIM_CODE}")
         assert detail.status_code == 200
-        alerts = detail.json()["data"]["risk_assessment"]["alerts"]
-        assert any(alert["code"] == "RF-09" for alert in alerts)
+        assert detail.json()["data"]["review_summary"]["current_flow_status"] == "ESCALATED_ANTIFRAUD"
 
 
-def test_analytics_endpoints_after_real_import() -> None:
-    payload = base_payload()
-    payload["claims"] = [
-        {
-            "id": CLAIM_ID,
-            "policy_id": POLICY_ID,
-            "insured_id": INSURED_ID,
-            "provider_id": PROVIDER_ID,
-            "branch": "Vehiculos",
-            "coverage": "Robo",
-            "occurrence_date": "2026-01-03",
-            "reported_date": "2026-01-10",
-            "claimed_amount": "24000",
-            "status": "Reserva",
-            "office": "Quito Norte",
-            "description": "Robo total del vehiculo durante madrugada sin testigos.",
-            "documents": [],
-        }
-    ]
+def test_analytics_and_agent_endpoints() -> None:
+    import_test_payload(claim_payload())
 
     with TestClient(app) as client:
-        import_test_payload(payload)
-
         summary = client.get("/api/analytics/summary")
+        providers = client.get("/api/analytics/providers")
+        alerts = client.get("/api/analytics/alerts")
+        review_status = client.get("/api/analytics/review-status")
+        branches = client.get("/api/analytics/branches")
+        cities = client.get("/api/analytics/cities")
+        top = client.get("/api/risk/top")
+
         assert summary.status_code == 200
-        summary_data = summary.json()["data"]
-        assert summary_data["total_claims"] == 1
-        assert summary_data["casos_alto_riesgo"] == 1
-        assert summary_data["casos_en_bandeja"] == 1
-        assert summary_data["exposicion_total"] == "24000.00"
-        assert summary_data["score_promedio_ia"] >= 76
-        assert summary_data["casos_por_ramo"] == [{"ramo": "Vehiculos", "count": 1}]
-        assert {"nivel_riesgo": "rojo", "count": 1} in summary_data["distribucion_nivel_riesgo"]
-        assert summary_data["top_indicadores"][0]["codigo_regla"].startswith("RF-")
-
-        providers = client.get("/api/analytics/providers?limit=3")
         assert providers.status_code == 200
-        providers_data = providers.json()["data"]
-        assert providers_data["total_proveedores"] == 1
-        assert providers_data["proveedores_con_siniestros"] == 1
-        assert providers_data["proveedores_restringidos"] == 1
-        assert providers_data["casos_asociados"] == 1
-        assert providers_data["casos_alto_riesgo"] == 1
-        assert providers_data["exposicion_total"] == "24000.00"
-        assert providers_data["score_promedio"] >= 76
-        assert len(providers_data["items"]) == 1
-        provider_item = providers_data["items"][0]
-        assert set(provider_item) == {"proveedor", "tipo", "casos_alto_riesgo", "score_promedio"}
-        assert provider_item["proveedor"] == "Taller Observado"
-        assert provider_item["tipo"] == "Taller"
-        assert provider_item["casos_alto_riesgo"] == 1
-        assert provider_item["score_promedio"] >= 76
-
-        alerts = client.get("/api/analytics/alerts?limit=3")
         assert alerts.status_code == 200
-        alerts_data = alerts.json()["data"]
-        assert alerts_data["total_alertas"] >= 1
-        assert alerts_data["reglas_activadas"] >= 1
-        assert alerts_data["casos_con_alertas"] == 1
-        assert alerts_data["puntos_totales"] > 0
-        assert len(alerts_data["items"]) >= 1
-        alert_item = alerts_data["items"][0]
-        assert set(alert_item) == {"codigo_regla", "indicador", "frecuencia"}
-        assert alert_item["codigo_regla"].startswith("RF-")
-        assert alert_item["indicador"]
-        assert alert_item["frecuencia"] >= 1
+        assert review_status.status_code == 200
+        assert branches.status_code == 200
+        assert cities.status_code == 200
+        assert top.status_code == 200
+        assert summary.json()["data"]["casos_alto_riesgo"] == 1
+        assert providers.json()["data"]["items"][0]["total_alertas"] >= 1
+        assert alerts.json()["data"]["items"][0]["codigo_regla"].startswith("RP-")
+        assert branches.json()["data"][0]["ramo"] == "Vehiculos"
+        assert cities.json()["data"][0]["ciudad"] == "Quito"
+        assert top.json()["data"][0]["score_total"] is not None
+
+        session = client.post("/api/agent/sessions", json={"title": "Analisis demo", "claim_id": CLAIM_CODE})
+        assert session.status_code == 200
+        session_id = session.json()["data"]["id"]
+
+        query = client.post(
+            "/api/agent/query",
+            json={
+                "question": "Por que este siniestro fue marcado?",
+                "session_id": session_id,
+                "context": {"claim_id": CLAIM_CODE, "limit": 5},
+            },
+        )
+        assert query.status_code == 200
+        agent_data = query.json()["data"]
+        assert agent_data["used_llm"] is False
+        assert "alerta" in agent_data["answer"].lower() or "score" in agent_data["answer"].lower()
+
+        explain = client.post(f"/api/agent/claims/{CLAIM_CODE}/explain")
+        assert explain.status_code == 200
+        assert explain.json()["data"]["claim_id"]
+
+        messages = client.get(f"/api/agent/sessions/{session_id}/messages")
+        assert messages.status_code == 200
+        assert len(messages.json()["data"]) == 2
+
+        suggested = client.get("/api/agent/suggested-questions")
+        assert suggested.status_code == 200
+        assert suggested.json()["data"]
+
+
+def test_risk_engine_yellow_override_for_narrative_similarity() -> None:
+    engine = RiskEngine()
+
+    class DummyClaim:
+        policy = None
+        provider = None
+        coverage = "Choque"
+        occurrence_date = None
+        reported_date = None
+        days_from_policy_start = 20
+        days_from_policy_end = 200
+        report_delay_days = 0
+        insured_claim_history = 0
+        documents_complete = True
+        provider_list_restrictive = False
+        claimed_amount = Decimal("1000")
+        insured_amount = Decimal("10000")
+        description = "Golpe leve"
+        documents = []
+
+    evaluation = engine.evaluate(
+        DummyClaim(),
+        RiskContext(narrative_similarity=0.96, similar_claim_code="SIN-CLON", ai_model_score=0),
+    )
+    assert evaluation.level == "amarillo"
+    assert evaluation.score >= 60
+    assert any(alert.code == "RP-006" for alert in evaluation.alerts)

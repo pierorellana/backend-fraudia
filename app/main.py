@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.routes.router import api_router
 from app.core.config import settings
@@ -17,12 +19,17 @@ from app.schemas.common import GeneralResponse
 from app.schemas.common import success_response
 from app import models  # noqa: F401
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if settings.auto_create_tables:
-        Base.metadata.create_all(bind=engine)
-    ensure_code_columns(engine)
+    try:
+        if settings.auto_create_tables:
+            Base.metadata.create_all(bind=engine)
+        ensure_code_columns(engine)
+    except SQLAlchemyError as exc:
+        logger.warning("Database initialization skipped because the connection is unavailable: %s", exc)
     yield
 
 

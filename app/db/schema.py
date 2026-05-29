@@ -8,7 +8,9 @@ CODED_TABLES = (
     ("asegurados", "id_asegurado", "ASE"),
     ("polizas", "id_poliza", "POL"),
     ("proveedores", "id_proveedor", "PRO"),
+    ("vehiculos", "id_vehiculo", "VEH"),
     ("siniestros", "id_siniestro", "SIN"),
+    ("documentos", "id_documento", "DOC"),
 )
 
 
@@ -24,7 +26,7 @@ def ensure_code_columns(engine: Engine) -> None:
 
             columns = {column["name"] for column in inspector.get_columns(table_name)}
             if "code" not in columns:
-                connection.execute(text(f"ALTER TABLE {quote(table_name)} ADD COLUMN {quote('code')} VARCHAR(20)"))
+                connection.execute(text(f"ALTER TABLE {quote(table_name)} ADD COLUMN {quote('code')} VARCHAR(40)"))
 
             _backfill_missing_codes(connection, table_name, primary_key, prefix, quote)
             if not _has_unique_code_constraint(inspector, table_name):
@@ -57,7 +59,7 @@ def _backfill_missing_codes(connection, table_name: str, primary_key: str, prefi
         )
     ).mappings()
     rows = list(rows)
-    used_codes = {str(row["code"]).strip() for row in rows if row["code"] and str(row["code"]).strip()}
+    used_codes = {str(row['code']).strip() for row in rows if row["code"] and str(row["code"]).strip()}
     next_number = 1
 
     for row in rows:

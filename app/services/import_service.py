@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any
 
@@ -9,6 +11,9 @@ from app.models.domain import Claim
 from app.models.domain import ClaimDocument
 from app.models.domain import ChatMessage
 from app.models.domain import ChatSession
+from app.models.domain import ClaimReview
+from app.models.domain import DatasetLoad
+from app.models.domain import DatasetLoadError
 from app.models.domain import Insured
 from app.models.domain import Policy
 from app.models.domain import Provider
@@ -41,40 +46,30 @@ class ImportService:
         self._bulk_upsert(db, Insured, [insured.model_dump() for insured in payload.insureds], code_prefix="ASE")
         self._bulk_upsert(db, Provider, [provider.model_dump() for provider in payload.providers], code_prefix="PRO")
         self._bulk_upsert(db, Policy, [policy.model_dump() for policy in payload.policies], code_prefix="POL")
-        self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles])
-
-        policies_by_id = {policy.id: policy for policy in payload.policies}
-        missing_policy_ids = {
-            claim.policy_id
-            for claim in payload.claims
-            if claim.policy_id not in policies_by_id
-        }
-        if missing_policy_ids:
-            policies_by_id.update(
-                {
-                    policy.id: policy
-                    for policy in db.scalars(select(Policy).where(Policy.id.in_(missing_policy_ids))).all()
-                }
-            )
+        self._bulk_upsert(db, Vehicle, [vehicle.model_dump() for vehicle in payload.vehicles], code_prefix="VEH")
 
         claim_mappings: list[dict[str, Any]] = []
         document_mappings: list[dict[str, Any]] = []
         for claim_payload in payload.claims:
             claim_data = claim_payload.model_dump(exclude={"documents"})
-            policy = policies_by_id.get(claim_payload.policy_id)
+            policy = db.get(Policy, claim_payload.policy_id)
+            vehicle = db.scalars(select(Vehicle).where(Vehicle.policy_id == claim_payload.policy_id)).first()
             if policy and claim_payload.occurrence_date:
-                if claim_data["days_from_policy_start"] is None:
+                if claim_data["days_from_policy_start"] is None and policy.start_date:
                     claim_data["days_from_policy_start"] = (claim_payload.occurrence_date - policy.start_date).days
-                if claim_data["days_from_policy_end"] is None:
+                if claim_data["days_from_policy_end"] is None and policy.end_date:
                     claim_data["days_from_policy_end"] = (policy.end_date - claim_payload.occurrence_date).days
+            if claim_data.get("vehicle_id") is None and vehicle:
+                claim_data["vehicle_id"] = vehicle.id
             if claim_payload.occurrence_date and claim_payload.reported_date and claim_data["report_delay_days"] is None:
                 claim_data["report_delay_days"] = (claim_payload.reported_date - claim_payload.occurrence_date).days
+            if claim_payload.claimed_amount is not None and claim_data.get("insured_amount") not in (None, 0):
+                claim_data["ratio_to_insured_amount"] = claim_payload.claimed_amount / claim_data["insured_amount"]
             if claim_payload.documents:
                 claim_data["documents_complete"] = all(
                     document.delivered and document.legible and not document.inconsistency_detected
                     for document in claim_payload.documents
                 )
-
             claim_mappings.append(claim_data)
             document_mappings.extend(
                 {"claim_id": claim_payload.id, **document.model_dump()}
@@ -86,19 +81,24 @@ class ImportService:
             db.execute(delete(ClaimDocument).where(ClaimDocument.claim_id.in_(claim_ids)))
         self._bulk_upsert(db, Claim, claim_mappings, code_prefix="SIN")
         if document_mappings:
-            db.bulk_insert_mappings(ClaimDocument, document_mappings)
+            self._bulk_upsert(db, ClaimDocument, document_mappings, code_prefix="DOC")
 
         if should_continue:
             should_continue()
         db.commit()
 
         assessments = 0
-        if assess_claims:
-            assessments = self.risk_service.assess_claims(
-                db,
-                [claim.id for claim in payload.claims],
-                use_embeddings=use_embeddings,
-                should_continue=should_continue,
+        if assess_claims and payload.claims:
+            assessments = len(
+                self.risk_service.assess_claims(
+                    db,
+                    [claim.id for claim in payload.claims],
+                    include_ai_model=True,
+                    include_nlp=True,
+                    force_recalculate=True,
+                    use_embeddings=use_embeddings,
+                    should_continue=should_continue,
+                )
             )
 
         return {
@@ -107,6 +107,7 @@ class ImportService:
             "vehicles": len(payload.vehicles),
             "providers": len(payload.providers),
             "claims": len(payload.claims),
+            "documents": len(document_mappings),
             "assessments": assessments,
         }
 
@@ -115,12 +116,15 @@ class ImportService:
         db.execute(delete(RiskAssessment))
         db.execute(delete(ChatMessage))
         db.execute(delete(ChatSession))
+        db.execute(delete(ClaimReview))
         db.execute(delete(ClaimDocument))
         db.execute(delete(Claim))
         db.execute(delete(Vehicle))
         db.execute(delete(Policy))
         db.execute(delete(Provider))
         db.execute(delete(Insured))
+        db.execute(delete(DatasetLoadError))
+        db.execute(delete(DatasetLoad))
         db.flush()
 
     def _bulk_upsert(
@@ -136,7 +140,7 @@ class ImportService:
 
         deduplicated = {mapping["id"]: mapping for mapping in mappings}
         records = list(deduplicated.values())
-        if code_prefix is not None:
+        if code_prefix is not None and hasattr(model, "code"):
             self._ensure_codes(db, model, records, code_prefix)
 
         record_ids = list(deduplicated)
@@ -150,21 +154,13 @@ class ImportService:
             db.bulk_update_mappings(model, updates)
 
     def _ensure_codes(self, db: Session, model: type, records: list[dict[str, Any]], prefix: str) -> None:
-        record_ids = [record["id"] for record in records]
-        existing_rows = db.execute(select(model.id, model.code).where(model.id.in_(record_ids))).all()
-        codes_by_id = {
-            row.id: self._clean_code(row.code)
+        existing_rows = db.execute(select(model.id, model.code).where(model.code.is_not(None))).all()
+        existing_code_owners = {
+            self._clean_code(row.code): row.id
             for row in existing_rows
             if self._clean_code(row.code)
         }
-        existing_code_owners = {
-            clean_code: row.id
-            for row in db.execute(select(model.id, model.code).where(model.code.is_not(None))).all()
-            if (clean_code := self._clean_code(row.code))
-        }
-        used_codes = set(existing_code_owners)
         batch_codes: set[str] = set()
-        batch_code_owners: dict[str, str] = {}
         next_number = 1
 
         for record in records:
@@ -172,32 +168,16 @@ class ImportService:
             if code:
                 existing_owner = existing_code_owners.get(code)
                 if existing_owner and existing_owner != record["id"]:
-                    raise ValueError(
-                        f"Codigo duplicado en {model.__tablename__}: {code} ya pertenece a {existing_owner}."
-                    )
-                batch_owner = batch_code_owners.get(code)
-                if batch_owner and batch_owner != record["id"]:
-                    raise ValueError(
-                        f"Codigo duplicado en la carga de {model.__tablename__}: {code}."
-                    )
+                    raise ValueError(f"Codigo duplicado en {model.__tablename__}: {code}.")
                 record["code"] = code
                 batch_codes.add(code)
-                batch_code_owners[code] = record["id"]
-                continue
-
-            existing_code = codes_by_id.get(record["id"])
-            if existing_code:
-                record["code"] = existing_code
-                batch_codes.add(existing_code)
-                batch_code_owners[existing_code] = record["id"]
                 continue
 
             while True:
                 candidate = f"{prefix}-{next_number:04d}"
                 next_number += 1
-                if candidate not in used_codes and candidate not in batch_codes:
+                if candidate not in existing_code_owners and candidate not in batch_codes:
                     record["code"] = candidate
-                    used_codes.add(candidate)
                     batch_codes.add(candidate)
                     break
 
